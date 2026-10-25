@@ -1,0 +1,9 @@
+FROM php:8.2.0-fpm
+
+RUN mkdir -p /tmp/sessions && chmod 1777 /tmp/sessions
+
+COPY php-fpm.ini /usr/local/etc/php/php.ini
+COPY www-pool.conf /usr/local/etc/php-fpm.d/zz-lab.conf
+COPY www /var/www/html
+
+RUN chown -R www-data:www-data /var/www/html /tmp/sessions

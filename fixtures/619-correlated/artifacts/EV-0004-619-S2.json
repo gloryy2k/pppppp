@@ -1,0 +1,1 @@
+{"event":{"event_type":"state_consume","extra":{},"line_no":0,"message":"early consumer operation read state left by the previous request","nonce":null,"parse_error":null,"phase":"request_startup","pid":null,"raw":"","request_id":"fixture-consumer-req","sapi":null,"severity":"warning","source":"lab_trace","timestamp":"2026-10-24T12:00:02.100Z","worker_id":"4242"}}

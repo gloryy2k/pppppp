@@ -1,0 +1,144 @@
+{
+  "environment": {
+    "kind": "fixture",
+    "limits": {},
+    "note": "Synthetic fixture used to exercise PRODUCER_CONSUMER_CORRELATED. It cannot produce confirmed proof statuses.",
+    "synthetic": true,
+    "telemetry_files": []
+  },
+  "finished_at": "2026-10-23T18:13:36.439Z",
+  "mode": "fixture",
+  "notes": [
+    "No network requests were sent while building this fixture."
+  ],
+  "profile": {
+    "base_url": "http://fixture.invalid/",
+    "build_metadata": {},
+    "collected_at": "2026-10-24T12:00:00.000Z",
+    "config": {},
+    "environment_kind": "fixture",
+    "frontend": {},
+    "host": "fixture.invalid",
+    "notes": [
+      "Synthetic fixture: no network request was made.",
+      "Version/SAPI values are invented to exercise the status ladder."
+    ],
+    "packaging": null,
+    "patch": {
+      "backports": [],
+      "branch": "8.2",
+      "details": "CVE-2026-109618: PHP 8.2.12 is below fixed release 8.2.35.; CVE-2026-109619: PHP 8.2.12 is below fixed release 8.2.35.",
+      "evidence_refs": [],
+      "fixed_version": "8.2.35",
+      "notes": [
+        "fixture"
+      ],
+      "packaging": null,
+      "per_cve": {
+        "CVE-2026-109618": {
+          "details": "PHP 8.2.12 is below fixed release 8.2.35.",
+          "state": "AFFECTED",
+          "trust": "high"
+        },
+        "CVE-2026-109619": {
+          "details": "PHP 8.2.12 is below fixed release 8.2.35.",
+          "state": "AFFECTED",
+          "trust": "high"
+        }
+      },
+      "source": "fixture-lab-status-endpoint",
+      "state": "AFFECTED",
+      "trust": "high",
+      "version": "8.2.12"
+    },
+    "php_version": "8.2.12",
+    "port": 80,
+    "reach": {
+      "basis": [
+        "fixture status endpoint echoed a request id"
+      ],
+      "blocked_by": null,
+      "evidence_refs": [],
+      "frontend": {},
+      "limitations": [
+        "Synthetic fixture; not a real reachability observation."
+      ],
+      "request_id": "fixture-producer-req",
+      "state": "REACHED",
+      "worker_id": "4242"
+    },
+    "sapi": "fpm",
+    "sapi_source": "fixture-lab-status-endpoint",
+    "sapi_verified": true,
+    "target": "http://fixture.invalid/",
+    "tls": false,
+    "version_source": "fixture-lab-status-endpoint",
+    "version_trust": "high"
+  },
+  "run_id": "fixture-619-correlated",
+  "scenario_runs": [
+    {
+      "canary": {},
+      "canary_refs": [],
+      "consumer_request_id": "fixture-consumer-req",
+      "consumer_worker_id": "4242",
+      "control_refs": [],
+      "correlation": {
+        "address_reuse": false,
+        "consumer_events": 1,
+        "consumer_worker": "4242",
+        "correlation_strength": "strong",
+        "early_consumer": true,
+        "missing": [
+          "trace proving the consumed state is the freed producer request's memory",
+          "patched-baseline differential"
+        ],
+        "producer_ended_before_consumer": true,
+        "producer_events": 1,
+        "producer_fatal": true,
+        "producer_oom": false,
+        "producer_worker": "4242",
+        "reasons": [
+          "SYNTHETIC fixture: same worker PID and ordered requests were invented",
+          "no pointer/address identity links the consumed state to freed memory"
+        ],
+        "same_worker": true,
+        "stale_marker": false,
+        "state_consumed": true,
+        "state_published": true,
+        "worker_recycled_between": false
+      },
+      "cve": "CVE-2026-109619",
+      "executed": true,
+      "finished_at": "2026-10-24T12:00:03.000Z",
+      "health_refs": [],
+      "interrupted": false,
+      "notes": [
+        "SYNTHETIC fixture run. It demonstrates correlation reporting, not a real stale-state finding."
+      ],
+      "oom_refs": [],
+      "producer_request_id": "fixture-producer-req",
+      "producer_worker_id": "4242",
+      "request_refs": [
+        "EV-0001",
+        "EV-0002"
+      ],
+      "scenario_id": "619-S2",
+      "skipped_reason": "",
+      "started_at": "2026-10-24T12:00:00.000Z",
+      "state_consume_refs": [
+        "EV-0004"
+      ],
+      "state_publish_refs": [
+        "EV-0003"
+      ],
+      "telemetry_refs": [
+        "EV-0003",
+        "EV-0004"
+      ],
+      "trace_refs": []
+    }
+  ],
+  "started_at": "2026-10-24T12:00:00.000Z",
+  "tool_version": "4.0.0"
+}

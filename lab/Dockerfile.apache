@@ -1,0 +1,9 @@
+FROM php:8.2.0-apache
+
+RUN mkdir -p /tmp/sessions && chmod 1777 /tmp/sessions
+RUN a2enmod rewrite
+
+COPY php-apache.ini /usr/local/etc/php/php.ini
+COPY www /var/www/html
+
+RUN chown -R www-data:www-data /var/www/html /tmp/sessions

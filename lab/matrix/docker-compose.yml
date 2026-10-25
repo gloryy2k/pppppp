@@ -1,0 +1,89 @@
+# Patched-vs-unpatched matrix for CVE-2026-109618 / CVE-2026-109619.
+#
+# Images are pinned to the last affected and first fixed releases of the 8.2
+# branch.  The 8.3/8.4/8.5 branches use the same fixed versions from the
+# advisories (8.3.36 / 8.4.27 / 8.5.12); change the tags if you need them.
+#
+# This matrix has NOT been executed in the authoring environment because no
+# Docker daemon was available.  See ../../COVERAGE.md before trusting it.
+#
+# Ports:
+#   18180 apache mod_php 8.2.34 (affected)
+#   18181 apache mod_php 8.2.35 (fixed)
+#   18182 nginx + FPM 8.2.34 (affected)
+#   18183 nginx + FPM 8.2.35 (fixed)
+
+services:
+  apache-affected:
+    image: php:8.2.34-apache
+    restart: unless-stopped
+    ports:
+      - "18180:80"
+    volumes:
+      - ../v4/www:/var/www/html:ro
+      - ./php-matrix.ini:/usr/local/etc/php/conf.d/zz-matrix.ini:ro
+    healthcheck:
+      test: ["CMD-SHELL", "php -r 'exit(PHP_VERSION === \"8.2.34\" ? 0 : 1);'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  apache-patched:
+    image: php:8.2.35-apache
+    restart: unless-stopped
+    ports:
+      - "18181:80"
+    volumes:
+      - ../v4/www:/var/www/html:ro
+      - ./php-matrix.ini:/usr/local/etc/php/conf.d/zz-matrix.ini:ro
+    healthcheck:
+      test: ["CMD-SHELL", "php -r 'exit(PHP_VERSION === \"8.2.35\" ? 0 : 1);'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  fpm-affected:
+    image: php:8.2.34-fpm
+    restart: unless-stopped
+    volumes:
+      - ../v4/www:/var/www/html:ro
+      - ./php-matrix.ini:/usr/local/etc/php/conf.d/zz-matrix.ini:ro
+    healthcheck:
+      test: ["CMD-SHELL", "php -r 'exit(PHP_VERSION === \"8.2.34\" ? 0 : 1);'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  fpm-patched:
+    image: php:8.2.35-fpm
+    restart: unless-stopped
+    volumes:
+      - ../v4/www:/var/www/html:ro
+      - ./php-matrix.ini:/usr/local/etc/php/conf.d/zz-matrix.ini:ro
+    healthcheck:
+      test: ["CMD-SHELL", "php -r 'exit(PHP_VERSION === \"8.2.35\" ? 0 : 1);'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  nginx-affected:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "18182:80"
+    volumes:
+      - ./nginx-affected.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../v4/www:/var/www/html:ro
+    depends_on:
+      - fpm-affected
+
+  nginx-patched:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "18183:80"
+    volumes:
+      - ./nginx-patched.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../v4/www:/var/www/html:ro
+    depends_on:
+      - fpm-patched

@@ -1,0 +1,1 @@
+{"event":{"event_type":"state_publish","extra":{},"line_no":0,"message":"request-owned global state published during interrupted shutdown","nonce":null,"parse_error":null,"phase":"shutdown","pid":null,"raw":"","request_id":"fixture-producer-req","sapi":null,"severity":"warning","source":"lab_trace","timestamp":"2026-10-24T12:00:01.200Z","worker_id":"4242"}}

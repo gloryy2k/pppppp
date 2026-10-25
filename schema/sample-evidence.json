@@ -1,0 +1,72 @@
+{
+  "artifact_path": "artifacts/EV-0001-619-S2.json",
+  "correlation_id": "fixture-producer-req",
+  "data": {
+    "classification": {
+      "detail": "PHP Fatal error: Uncaught RuntimeException: producer request aborted in /var/www/producer.php on line 12",
+      "display_errors": true,
+      "empty_body": false,
+      "execution_timeout": false,
+      "frontend_reject": false,
+      "gateway_error": false,
+      "kind": "PHP_FATAL",
+      "limitations": [],
+      "markers": [
+        "php_fatal_text"
+      ],
+      "oom": false,
+      "oom_context": "none",
+      "oom_limit_bytes": null,
+      "oom_line": null,
+      "oom_location": null,
+      "origin_error": false,
+      "php_generated": true,
+      "php_marker": true,
+      "proxy": false,
+      "reflection": false,
+      "startup_error": false,
+      "status": 500,
+      "worker_crash_suspected": false
+    },
+    "exchange": {
+      "body_bytes": 104,
+      "body_preview": "PHP Fatal error: Uncaught RuntimeException: producer request aborted in /var/www/producer.php on line 12",
+      "body_sha256": "",
+      "body_truncated": false,
+      "duration_ms": 400.0,
+      "error_kind": null,
+      "error_message": null,
+      "method": "POST",
+      "nonce": null,
+      "notes": [],
+      "peer": null,
+      "protocol": "",
+      "reason": "",
+      "received_at": "2026-10-24T12:00:01.400Z",
+      "redirect_chain": [],
+      "request_body_bytes": 0,
+      "request_body_sha256": "",
+      "request_headers": {},
+      "request_id": "fixture-producer-req",
+      "response_headers": {
+        "Content-Type": "text/html"
+      },
+      "sent_at": "2026-10-24T12:00:01.000Z",
+      "status": 500,
+      "tls_verified": null,
+      "url": "http://fixture.invalid/producer.php"
+    }
+  },
+  "id": "EV-0001",
+  "notes": "synthetic producer request; body is fabricated",
+  "redacted": true,
+  "request_id": "fixture-producer-req",
+  "scenario_id": "619-S2",
+  "sha256": "8719233d16700cae577e92a28825dba8a6c9f71078e38c5891f2ff8a41e9dc01",
+  "source": "http",
+  "synthetic": true,
+  "timestamp": "2026-10-24T12:00:01.400Z",
+  "truncated": false,
+  "trust": "high",
+  "worker_id": null
+}

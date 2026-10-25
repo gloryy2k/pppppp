@@ -1,0 +1,722 @@
+{
+  "answers": {
+    "did_oom_occur_in_php": {
+      "answer": "NO/NOT PROVEN",
+      "evidence_refs": [],
+      "note": "An OOM observation is not proof of either CVE.",
+      "phase": "n/a"
+    },
+    "did_test_request_reach_php": {
+      "answer": "REACHED",
+      "basis": [
+        "fixture status endpoint echoed a request id"
+      ],
+      "limitations": [
+        "Synthetic fixture; not a real reachability observation."
+      ]
+    },
+    "highest_conclusion_supported": {
+      "CVE-2026-109618": {
+        "evidence_refs": [],
+        "missing_evidence": [
+          "prove-mode OOM scenario execution with telemetry",
+          "correlated PHP OOM observation",
+          "lab trace of the startup/shutdown invalid-state path",
+          "patched-baseline differential"
+        ],
+        "reason": "Build/package evidence indicates an affected PHP version (8.2.12); exposure only, not proof.",
+        "scenario_id": "inventory",
+        "status": "EXPOSED_BUILD"
+      },
+      "CVE-2026-109619": {
+        "evidence_refs": [
+          "EV-0001",
+          "EV-0002",
+          "EV-0003",
+          "EV-0004"
+        ],
+        "missing_evidence": [
+          "trace proving the consumed state is the freed producer request's memory (pointer/address identity, UAF report or non-reflectable canary)",
+          "patched-baseline differential"
+        ],
+        "reason": "Producer state publication and an early consumer operation are correlated to the same worker across request boundaries; stale memory identity is not yet proven.",
+        "scenario_id": "619-S2",
+        "status": "PRODUCER_CONSUMER_CORRELATED"
+      }
+    },
+    "oom_stage": "n/a",
+    "patched_vs_unpatched_control": {
+      "note": "A 502-vs-200 difference alone is not a root-cause proof.",
+      "patch_state": "AFFECTED",
+      "patch_trust": "high",
+      "patched_baseline_observed": false
+    },
+    "what_links_observation_to_cve": {
+      "CVE-2026-109618": "build/package inventory",
+      "CVE-2026-109619": "telemetry: state_publish + same worker PID + producer end before consumer + consumer early operation"
+    },
+    "which_worker": {
+      "note": "Worker identity comes from telemetry, not HTTP keep-alive.",
+      "worker_ids": [
+        "4242"
+      ]
+    }
+  },
+  "environment": {
+    "build_metadata": {},
+    "collected_at": "2026-10-24T12:00:00.000Z",
+    "config": {},
+    "frontend": {},
+    "kind": "fixture",
+    "limits": {},
+    "notes": [
+      "Synthetic fixture: no network request was made.",
+      "Version/SAPI values are invented to exercise the status ladder."
+    ],
+    "packaging": null,
+    "patch": {
+      "backports": [],
+      "branch": "8.2",
+      "details": "CVE-2026-109618: PHP 8.2.12 is below fixed release 8.2.35.; CVE-2026-109619: PHP 8.2.12 is below fixed release 8.2.35.",
+      "evidence_refs": [],
+      "fixed_version": "8.2.35",
+      "notes": [
+        "fixture"
+      ],
+      "packaging": null,
+      "per_cve": {
+        "CVE-2026-109618": {
+          "details": "PHP 8.2.12 is below fixed release 8.2.35.",
+          "state": "AFFECTED",
+          "trust": "high"
+        },
+        "CVE-2026-109619": {
+          "details": "PHP 8.2.12 is below fixed release 8.2.35.",
+          "state": "AFFECTED",
+          "trust": "high"
+        }
+      },
+      "source": "fixture-lab-status-endpoint",
+      "state": "AFFECTED",
+      "trust": "high",
+      "version": "8.2.12"
+    },
+    "php_version": "8.2.12",
+    "reach": {
+      "basis": [
+        "fixture status endpoint echoed a request id"
+      ],
+      "blocked_by": null,
+      "evidence_refs": [],
+      "frontend": {},
+      "limitations": [
+        "Synthetic fixture; not a real reachability observation."
+      ],
+      "request_id": "fixture-producer-req",
+      "state": "REACHED",
+      "worker_id": "4242"
+    },
+    "sapi": "fpm",
+    "sapi_source": "fixture-lab-status-endpoint",
+    "sapi_verified": true,
+    "synthetic": true,
+    "telemetry_files": [],
+    "version_source": "fixture-lab-status-endpoint",
+    "version_trust": "high"
+  },
+  "evidence_index": [
+    {
+      "artifact_path": "artifacts/EV-0003-619-S2.json",
+      "correlation_id": "fixture-producer-req",
+      "id": "EV-0003",
+      "phase": "telemetry",
+      "request_id": "fixture-producer-req",
+      "scenario_id": "619-S2",
+      "sha256": "50a8b83763ec89ad298a90c92ff5a18d77ce516a25dafa559c9fff177ae54535",
+      "source": "lab_trace",
+      "summary": "state_publish: request-owned global state published during interrupted shutdown",
+      "synthetic": true,
+      "timestamp": "2026-10-24T12:00:01.200Z",
+      "trust": "high",
+      "worker_id": "4242"
+    },
+    {
+      "artifact_path": "artifacts/EV-0001-619-S2.json",
+      "correlation_id": "fixture-producer-req",
+      "id": "EV-0001",
+      "phase": "http",
+      "request_id": "fixture-producer-req",
+      "scenario_id": "619-S2",
+      "sha256": "8719233d16700cae577e92a28825dba8a6c9f71078e38c5891f2ff8a41e9dc01",
+      "source": "http",
+      "summary": "POST http://fixture.invalid/producer.php -> 500 (PHP_FATAL)",
+      "synthetic": true,
+      "timestamp": "2026-10-24T12:00:01.400Z",
+      "trust": "high",
+      "worker_id": null
+    },
+    {
+      "artifact_path": "artifacts/EV-0004-619-S2.json",
+      "correlation_id": "fixture-consumer-req",
+      "id": "EV-0004",
+      "phase": "telemetry",
+      "request_id": "fixture-consumer-req",
+      "scenario_id": "619-S2",
+      "sha256": "73ddde65095dfbda27d168b80a25f7c4312e535915c836698305d010c3ac192c",
+      "source": "lab_trace",
+      "summary": "state_consume: early consumer operation read state left by the previous request",
+      "synthetic": true,
+      "timestamp": "2026-10-24T12:00:02.100Z",
+      "trust": "high",
+      "worker_id": "4242"
+    },
+    {
+      "artifact_path": "artifacts/EV-0002-619-S2.json",
+      "correlation_id": "fixture-consumer-req",
+      "id": "EV-0002",
+      "phase": "http",
+      "request_id": "fixture-consumer-req",
+      "scenario_id": "619-S2",
+      "sha256": "ecddb4fe7ff11bdc2534431172623da5c895f0831e3ea0d4ca7c0b04b8a66a93",
+      "source": "http",
+      "summary": "GET http://fixture.invalid/consumer.php -> 200 (OK)",
+      "synthetic": true,
+      "timestamp": "2026-10-24T12:00:02.400Z",
+      "trust": "high",
+      "worker_id": null
+    }
+  ],
+  "executive_summary": {
+    "note": "The two CVE verdicts are independent. No combined confidence is computed and PATCH_CONFIRMED comes only from build/package evidence.",
+    "verdicts": {
+      "CVE-2026-109618": {
+        "evidence_refs": [],
+        "missing_evidence": [
+          "prove-mode OOM scenario execution with telemetry",
+          "correlated PHP OOM observation",
+          "lab trace of the startup/shutdown invalid-state path",
+          "patched-baseline differential"
+        ],
+        "reason": "Build/package evidence indicates an affected PHP version (8.2.12); exposure only, not proof.",
+        "scenario_id": "inventory",
+        "status": "EXPOSED_BUILD"
+      },
+      "CVE-2026-109619": {
+        "evidence_refs": [
+          "EV-0001",
+          "EV-0002",
+          "EV-0003",
+          "EV-0004"
+        ],
+        "missing_evidence": [
+          "trace proving the consumed state is the freed producer request's memory (pointer/address identity, UAF report or non-reflectable canary)",
+          "patched-baseline differential"
+        ],
+        "reason": "Producer state publication and an early consumer operation are correlated to the same worker across request boundaries; stale memory identity is not yet proven.",
+        "scenario_id": "619-S2",
+        "status": "PRODUCER_CONSUMER_CORRELATED"
+      }
+    }
+  },
+  "findings": [
+    {
+      "advisory": {
+        "affected_text": "< 8.2.35, < 8.3.36, < 8.4.27, < 8.5.12",
+        "cwe": [
+          "CWE-416",
+          "CWE-755",
+          "CWE-824",
+          "CWE-1325",
+          "CWE-1419"
+        ],
+        "fixed": {
+          "8.2": 35,
+          "8.3": 36,
+          "8.4": 27,
+          "8.5": 12
+        },
+        "ghsa": "GHSA-w8hw-w9fx-j79w",
+        "severity": "critical",
+        "summary": "PHP uses longjmp() for OOM. In some contexts request memory is temporarily reachable before it is fully initialised; an allocation failure there leaves request memory invalid. Request shutdown may then read or branch on it. Multiple multipart OOM strategies reach this state. Confirmed RCE on Apache mod_php; FPM is supported as susceptible by source analysis but no complete FPM exploit was demonstrated for the startup path (FPM exits the child on startup failure).",
+        "title": "RCE via OOM corruption",
+        "url": "https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w"
+      },
+      "alternative_explanations": [
+        "Application/extension allocation failure unrelated to the advisory.",
+        "Frontend/WAF/proxy generated the error response.",
+        "Generic PHP fatal error or resource exhaustion unrelated to CVE-2026-109618.",
+        "PHP banner spoofed/stripped, or a distro backport changed the effective build.",
+        "Higher memory_limit or a different SAPI prevented the advisory path."
+      ],
+      "cve": "CVE-2026-109618",
+      "evidence_refs": [],
+      "generated_at": "2026-10-23T18:13:36.439Z",
+      "missing_evidence": [
+        "prove-mode OOM scenario execution with telemetry",
+        "correlated PHP OOM observation",
+        "lab trace of the startup/shutdown invalid-state path",
+        "patched-baseline differential"
+      ],
+      "observations": [
+        {
+          "attribution": "none",
+          "detail": "PHP diagnostics are exposed to clients (PHP_FATAL).",
+          "evidence_ref": "EV-0001",
+          "kind": "display_errors_visible",
+          "note": "Application/configuration observation. It is not proof of CVE-2026-109618 or CVE-2026-109619."
+        }
+      ],
+      "patch_evidence": {
+        "backports": [],
+        "branch": "8.2",
+        "details": "CVE-2026-109618: PHP 8.2.12 is below fixed release 8.2.35.; CVE-2026-109619: PHP 8.2.12 is below fixed release 8.2.35.",
+        "evidence_refs": [],
+        "fixed_version": "8.2.35",
+        "notes": [
+          "fixture"
+        ],
+        "packaging": null,
+        "per_cve": {
+          "CVE-2026-109618": {
+            "details": "PHP 8.2.12 is below fixed release 8.2.35.",
+            "state": "AFFECTED",
+            "trust": "high"
+          },
+          "CVE-2026-109619": {
+            "details": "PHP 8.2.12 is below fixed release 8.2.35.",
+            "state": "AFFECTED",
+            "trust": "high"
+          }
+        },
+        "source": "fixture-lab-status-endpoint",
+        "state": "AFFECTED",
+        "trust": "high",
+        "version": "8.2.12",
+        "version_source": "fixture-lab-status-endpoint",
+        "version_trust": "high"
+      },
+      "proof_limitations": [
+        "No negative result proves absence of the vulnerability.",
+        "An HTTP 500/502/503/504, timeout, empty body or connection reset is not evidence of OOM or of CVE-2026-109618.",
+        "A PHP OOM proves only that an allocation failed; it does not prove the invalid-state shutdown path.",
+        "OOM observed in application code has a different root cause from the advisory's startup/parser path.",
+        "A worker crash is a worker failure, not automatically this CVE.",
+        "EXPOSED_BUILD is an exposure assessment; no CVE path was exercised."
+      ],
+      "proof_method": "build/package inventory",
+      "remediation": [
+        "Upgrade to PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 or later (the only complete mitigation).",
+        "If upgrading is impossible, administratively set memory_limit=-1 and restart every worker; this removes the predictable control point but is not complete (mmap/underlying allocation failure can still longjmp).",
+        "Keep post_max_size conservative and enforce the decoded request size independently at the frontend.",
+        "Bound multipart parts, headers per part, input nesting and uploads; reject multipart bodies entirely if the application does not use them.",
+        "Do not use RLIMIT_AS/RLIMIT_DATA as a mitigation: they make mmap fail and can re-enter the vulnerable longjmp path.",
+        "Disabling session.upload_progress is NOT a mitigation for 109618."
+      ],
+      "reproduction_context": {
+        "canary": {},
+        "consumer_request_ids": [],
+        "environment_kind": "fixture",
+        "limits": {},
+        "mode": "fixture",
+        "patch_state": "AFFECTED",
+        "patch_trust": "high",
+        "php_version": "8.2.12",
+        "producer_request_ids": [],
+        "reach": {
+          "basis": [
+            "fixture status endpoint echoed a request id"
+          ],
+          "blocked_by": null,
+          "evidence_refs": [],
+          "frontend": {},
+          "limitations": [
+            "Synthetic fixture; not a real reachability observation."
+          ],
+          "request_id": "fixture-producer-req",
+          "state": "REACHED",
+          "worker_id": "4242"
+        },
+        "run_id": "fixture-619-correlated",
+        "sapi": "fpm",
+        "sapi_source": "fixture-lab-status-endpoint",
+        "sapi_verified": true,
+        "scenario_ids": [],
+        "synthetic": true,
+        "target": "http://fixture.invalid/",
+        "telemetry_files": [],
+        "tool_version": "4.0.0",
+        "version_source": "fixture-lab-status-endpoint",
+        "version_trust": "high",
+        "worker_ids": []
+      },
+      "scenario_id": "inventory",
+      "status": "EXPOSED_BUILD",
+      "status_reason": "Build/package evidence indicates an affected PHP version (8.2.12); exposure only, not proof."
+    },
+    {
+      "advisory": {
+        "affected_text": "< 8.2.35, < 8.3.36, < 8.4.27, < 8.5.12",
+        "cwe": [
+          "CWE-416",
+          "CWE-755",
+          "CWE-824",
+          "CWE-1325",
+          "CWE-1419"
+        ],
+        "fixed": {
+          "8.2": 35,
+          "8.3": 36,
+          "8.4": 27,
+          "8.5": 12
+        },
+        "ghsa": "GHSA-6wmf-4rv5-p3rp",
+        "severity": "critical",
+        "summary": "Worker-persistent global state can point at request-owned memory. If a producer request publishes such state and is interrupted (fatal/OOM) before its matching reset, a consumer operation in a later request handled by the same worker may use the stale state. Confirmed consumers include pre-initialisation INI diagnostics and session upload progress. Producer and consumer must hit the same worker; request/worker correlation is mandatory evidence.",
+        "title": "RCE via stale global state",
+        "url": "https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp"
+      },
+      "alternative_explanations": [
+        "Producer and consumer were handled by different workers.",
+        "The consumer performed normal initialisation rather than reading stale state.",
+        "The producer OOM/fatal did not publish request-owned global state.",
+        "A worker was recycled between requests (same PID may be a new process).",
+        "Application/session logic produced the diagnostic independently of stale state.",
+        "A reflected marker or static response was mistaken for a canary effect."
+      ],
+      "cve": "CVE-2026-109619",
+      "evidence_refs": [
+        "EV-0001",
+        "EV-0002",
+        "EV-0003",
+        "EV-0004"
+      ],
+      "generated_at": "2026-10-23T18:13:36.439Z",
+      "missing_evidence": [
+        "trace proving the consumed state is the freed producer request's memory (pointer/address identity, UAF report or non-reflectable canary)",
+        "patched-baseline differential"
+      ],
+      "observations": [
+        {
+          "attribution": "none",
+          "detail": "PHP diagnostics are exposed to clients (PHP_FATAL).",
+          "evidence_ref": "EV-0001",
+          "kind": "display_errors_visible",
+          "note": "Application/configuration observation. It is not proof of CVE-2026-109618 or CVE-2026-109619."
+        }
+      ],
+      "patch_evidence": {
+        "backports": [],
+        "branch": "8.2",
+        "details": "CVE-2026-109618: PHP 8.2.12 is below fixed release 8.2.35.; CVE-2026-109619: PHP 8.2.12 is below fixed release 8.2.35.",
+        "evidence_refs": [],
+        "fixed_version": "8.2.35",
+        "notes": [
+          "fixture"
+        ],
+        "packaging": null,
+        "per_cve": {
+          "CVE-2026-109618": {
+            "details": "PHP 8.2.12 is below fixed release 8.2.35.",
+            "state": "AFFECTED",
+            "trust": "high"
+          },
+          "CVE-2026-109619": {
+            "details": "PHP 8.2.12 is below fixed release 8.2.35.",
+            "state": "AFFECTED",
+            "trust": "high"
+          }
+        },
+        "source": "fixture-lab-status-endpoint",
+        "state": "AFFECTED",
+        "trust": "high",
+        "version": "8.2.12",
+        "version_source": "fixture-lab-status-endpoint",
+        "version_trust": "high"
+      },
+      "proof_limitations": [
+        "HTTP keep-alive does not identify a PHP-FPM worker; same-worker proof needs a worker PID or equivalent telemetry.",
+        "A single OOM is not proof of stale global state.",
+        "A consumer reading state is not proof that the state belonged to a freed request.",
+        "An HTTP 500/502/503/504, timeout or empty body is not producer/consumer evidence.",
+        "No negative result proves absence of the vulnerability."
+      ],
+      "proof_method": "telemetry: state_publish + same worker PID + producer end before consumer + consumer early operation",
+      "remediation": [
+        "Upgrade to PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 or later (the only reliable mitigation; there is no complete generic config fix).",
+        "PHP 8.5 only: set fatal_error_backtraces=0 administratively and restart every worker to remove the confirmed backtrace producer.",
+        "Session lifecycle path only: set session.upload_progress.enabled=0 administratively and restart every worker. This does not cover other state families.",
+        "Remove attacker-reachable fatal errors (including request timeouts) and diagnostics emitted before request initialisation or during cleanup.",
+        "Prefer startup php.ini / FPM pool configuration over per-request INI overrides; remove obsolete or invalid directives.",
+        "Consider pm.max_requests=1 to shorten worker state lifetime."
+      ],
+      "reproduction_context": {
+        "canary": {},
+        "consumer_request_ids": [
+          "fixture-consumer-req"
+        ],
+        "consumer_worker": "4242",
+        "correlation_strength": "strong",
+        "environment_kind": "fixture",
+        "limits": {},
+        "mode": "fixture",
+        "patch_state": "AFFECTED",
+        "patch_trust": "high",
+        "php_version": "8.2.12",
+        "producer_request_ids": [
+          "fixture-producer-req"
+        ],
+        "producer_worker": "4242",
+        "reach": {
+          "basis": [
+            "fixture status endpoint echoed a request id"
+          ],
+          "blocked_by": null,
+          "evidence_refs": [],
+          "frontend": {},
+          "limitations": [
+            "Synthetic fixture; not a real reachability observation."
+          ],
+          "request_id": "fixture-producer-req",
+          "state": "REACHED",
+          "worker_id": "4242"
+        },
+        "run_id": "fixture-619-correlated",
+        "sapi": "fpm",
+        "sapi_source": "fixture-lab-status-endpoint",
+        "sapi_verified": true,
+        "scenario_ids": [
+          "619-S2"
+        ],
+        "synthetic": true,
+        "target": "http://fixture.invalid/",
+        "telemetry_files": [],
+        "tool_version": "4.0.0",
+        "version_source": "fixture-lab-status-endpoint",
+        "version_trust": "high",
+        "worker_ids": [
+          "4242"
+        ]
+      },
+      "scenario_id": "619-S2",
+      "status": "PRODUCER_CONSUMER_CORRELATED",
+      "status_reason": "Producer state publication and an early consumer operation are correlated to the same worker across request boundaries; stale memory identity is not yet proven."
+    }
+  ],
+  "generated_at": "2026-10-23T18:13:36.443Z",
+  "integrity": {
+    "errors": [],
+    "evidence_count": 4,
+    "hash_algorithm": "sha256",
+    "hash_covers": "canonical JSON of the bounded, redacted evidence data",
+    "verified": true
+  },
+  "limitations": [
+    "THIS IS A FIXTURE/SYNTHETIC REPORT. It exercises the evidence and report pipeline; it is not proof about a real deployment.",
+    "Remote black-box HTTP cannot observe PHP request memory, shutdown ordering or worker-internal state.",
+    "A negative result does not prove absence of either vulnerability.",
+    "HTTP status codes (500/502/503/504), timeouts, empty bodies and connection resets are not crash or CVE evidence.",
+    "X-Powered-By is low trust and is never used for PATCH_CONFIRMED.",
+    "OOM proves an allocation failure, not the CVE-2026-109618 invalid-state path.",
+    "A worker crash is a worker failure, not automatically either CVE.",
+    "HTTP keep-alive is not evidence that two requests used the same PHP worker.",
+    "Evidence hashes cover the stored, bounded/redacted artefact, not the full unbounded wire body.",
+    "Timing correlation alone cannot establish same-worker identity.",
+    "CVE-2026-109618: No negative result proves absence of the vulnerability.",
+    "CVE-2026-109618: An HTTP 500/502/503/504, timeout, empty body or connection reset is not evidence of OOM or of CVE-2026-109618.",
+    "CVE-2026-109618: A PHP OOM proves only that an allocation failed; it does not prove the invalid-state shutdown path.",
+    "CVE-2026-109618: OOM observed in application code has a different root cause from the advisory's startup/parser path.",
+    "CVE-2026-109618: A worker crash is a worker failure, not automatically this CVE.",
+    "CVE-2026-109618: EXPOSED_BUILD is an exposure assessment; no CVE path was exercised.",
+    "CVE-2026-109619: HTTP keep-alive does not identify a PHP-FPM worker; same-worker proof needs a worker PID or equivalent telemetry.",
+    "CVE-2026-109619: A single OOM is not proof of stale global state.",
+    "CVE-2026-109619: A consumer reading state is not proof that the state belonged to a freed request.",
+    "CVE-2026-109619: An HTTP 500/502/503/504, timeout or empty body is not producer/consumer evidence.",
+    "CVE-2026-109619: No negative result proves absence of the vulnerability."
+  ],
+  "mode": "fixture",
+  "proof": {
+    "artifacts": [
+      {
+        "artifact_path": "artifacts/EV-0003-619-S2.json",
+        "id": "EV-0003",
+        "scenario_id": "619-S2",
+        "sha256": "50a8b83763ec89ad298a90c92ff5a18d77ce516a25dafa559c9fff177ae54535",
+        "source": "lab_trace",
+        "synthetic": true
+      },
+      {
+        "artifact_path": "artifacts/EV-0001-619-S2.json",
+        "id": "EV-0001",
+        "scenario_id": "619-S2",
+        "sha256": "8719233d16700cae577e92a28825dba8a6c9f71078e38c5891f2ff8a41e9dc01",
+        "source": "http",
+        "synthetic": true
+      },
+      {
+        "artifact_path": "artifacts/EV-0004-619-S2.json",
+        "id": "EV-0004",
+        "scenario_id": "619-S2",
+        "sha256": "73ddde65095dfbda27d168b80a25f7c4312e535915c836698305d010c3ac192c",
+        "source": "lab_trace",
+        "synthetic": true
+      },
+      {
+        "artifact_path": "artifacts/EV-0002-619-S2.json",
+        "id": "EV-0002",
+        "scenario_id": "619-S2",
+        "sha256": "ecddb4fe7ff11bdc2534431172623da5c895f0831e3ea0d4ca7c0b04b8a66a93",
+        "source": "http",
+        "synthetic": true
+      }
+    ],
+    "canaries": [],
+    "controls": []
+  },
+  "remediation": {
+    "CVE-2026-109618": [
+      "Upgrade to PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 or later (the only complete mitigation).",
+      "If upgrading is impossible, administratively set memory_limit=-1 and restart every worker; this removes the predictable control point but is not complete (mmap/underlying allocation failure can still longjmp).",
+      "Keep post_max_size conservative and enforce the decoded request size independently at the frontend.",
+      "Bound multipart parts, headers per part, input nesting and uploads; reject multipart bodies entirely if the application does not use them.",
+      "Do not use RLIMIT_AS/RLIMIT_DATA as a mitigation: they make mmap fail and can re-enter the vulnerable longjmp path.",
+      "Disabling session.upload_progress is NOT a mitigation for 109618."
+    ],
+    "CVE-2026-109619": [
+      "Upgrade to PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 or later (the only reliable mitigation; there is no complete generic config fix).",
+      "PHP 8.5 only: set fatal_error_backtraces=0 administratively and restart every worker to remove the confirmed backtrace producer.",
+      "Session lifecycle path only: set session.upload_progress.enabled=0 administratively and restart every worker. This does not cover other state families.",
+      "Remove attacker-reachable fatal errors (including request timeouts) and diagnostics emitted before request initialisation or during cleanup.",
+      "Prefer startup php.ini / FPM pool configuration over per-request INI overrides; remove obsolete or invalid directives.",
+      "Consider pm.max_requests=1 to shorten worker state lifetime."
+    ]
+  },
+  "run_id": "fixture-619-correlated",
+  "scenarios": [
+    {
+      "canary": {},
+      "canary_refs": [],
+      "consumer_request_id": "fixture-consumer-req",
+      "consumer_worker_id": "4242",
+      "control_refs": [],
+      "correlation": {
+        "address_reuse": false,
+        "consumer_events": 1,
+        "consumer_worker": "4242",
+        "correlation_strength": "strong",
+        "early_consumer": true,
+        "missing": [
+          "trace proving the consumed state is the freed producer request's memory",
+          "patched-baseline differential"
+        ],
+        "producer_ended_before_consumer": true,
+        "producer_events": 1,
+        "producer_fatal": true,
+        "producer_oom": false,
+        "producer_worker": "4242",
+        "reasons": [
+          "SYNTHETIC fixture: same worker PID and ordered requests were invented",
+          "no pointer/address identity links the consumed state to freed memory"
+        ],
+        "same_worker": true,
+        "stale_marker": false,
+        "state_consumed": true,
+        "state_published": true,
+        "worker_recycled_between": false
+      },
+      "cve": "CVE-2026-109619",
+      "executed": true,
+      "finished_at": "2026-10-24T12:00:03.000Z",
+      "health_refs": [],
+      "interrupted": false,
+      "notes": [
+        "SYNTHETIC fixture run. It demonstrates correlation reporting, not a real stale-state finding."
+      ],
+      "oom_refs": [],
+      "producer_request_id": "fixture-producer-req",
+      "producer_worker_id": "4242",
+      "request_refs": [
+        "EV-0001",
+        "EV-0002"
+      ],
+      "scenario_id": "619-S2",
+      "skipped_reason": "",
+      "started_at": "2026-10-24T12:00:00.000Z",
+      "state_consume_refs": [
+        "EV-0004"
+      ],
+      "state_publish_refs": [
+        "EV-0003"
+      ],
+      "telemetry_refs": [
+        "EV-0003",
+        "EV-0004"
+      ],
+      "trace_refs": []
+    }
+  ],
+  "schema_version": "php2shell-report/1",
+  "target": "http://fixture.invalid/",
+  "timeline": [
+    {
+      "artifact_path": "artifacts/EV-0003-619-S2.json",
+      "correlation_id": "fixture-producer-req",
+      "id": "EV-0003",
+      "phase": "telemetry",
+      "request_id": "fixture-producer-req",
+      "scenario_id": "619-S2",
+      "sha256": "50a8b83763ec89ad298a90c92ff5a18d77ce516a25dafa559c9fff177ae54535",
+      "source": "lab_trace",
+      "summary": "state_publish: request-owned global state published during interrupted shutdown",
+      "synthetic": true,
+      "timestamp": "2026-10-24T12:00:01.200Z",
+      "trust": "high",
+      "worker_id": "4242"
+    },
+    {
+      "artifact_path": "artifacts/EV-0001-619-S2.json",
+      "correlation_id": "fixture-producer-req",
+      "id": "EV-0001",
+      "phase": "http",
+      "request_id": "fixture-producer-req",
+      "scenario_id": "619-S2",
+      "sha256": "8719233d16700cae577e92a28825dba8a6c9f71078e38c5891f2ff8a41e9dc01",
+      "source": "http",
+      "summary": "POST http://fixture.invalid/producer.php -> 500 (PHP_FATAL)",
+      "synthetic": true,
+      "timestamp": "2026-10-24T12:00:01.400Z",
+      "trust": "high",
+      "worker_id": null
+    },
+    {
+      "artifact_path": "artifacts/EV-0004-619-S2.json",
+      "correlation_id": "fixture-consumer-req",
+      "id": "EV-0004",
+      "phase": "telemetry",
+      "request_id": "fixture-consumer-req",
+      "scenario_id": "619-S2",
+      "sha256": "73ddde65095dfbda27d168b80a25f7c4312e535915c836698305d010c3ac192c",
+      "source": "lab_trace",
+      "summary": "state_consume: early consumer operation read state left by the previous request",
+      "synthetic": true,
+      "timestamp": "2026-10-24T12:00:02.100Z",
+      "trust": "high",
+      "worker_id": "4242"
+    },
+    {
+      "artifact_path": "artifacts/EV-0002-619-S2.json",
+      "correlation_id": "fixture-consumer-req",
+      "id": "EV-0002",
+      "phase": "http",
+      "request_id": "fixture-consumer-req",
+      "scenario_id": "619-S2",
+      "sha256": "ecddb4fe7ff11bdc2534431172623da5c895f0831e3ea0d4ca7c0b04b8a66a93",
+      "source": "http",
+      "summary": "GET http://fixture.invalid/consumer.php -> 200 (OK)",
+      "synthetic": true,
+      "timestamp": "2026-10-24T12:00:02.400Z",
+      "trust": "high",
+      "worker_id": null
+    }
+  ],
+  "tool_version": "4.0.0"
+}

