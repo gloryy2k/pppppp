@@ -1,0 +1,14 @@
+services:
+  # PHP 8.4 Apache mod_php — for Chain D heap leak testing
+  apache-chaind:
+    build:
+      context: .
+      dockerfile: Dockerfile.apache-84
+    ports:
+      - "18084:80"
+    volumes:
+      - ./www:/var/www/html
+      - ./php-apache-chaind.ini:/usr/local/etc/php/conf.d/99-custom.ini:ro
+    environment:
+      - APACHE_RUN_USER=www-data
+      - APACHE_RUN_GROUP=www-data

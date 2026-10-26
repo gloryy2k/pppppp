@@ -1,0 +1,8 @@
+FROM php:8.4.26-apache-trixie
+
+RUN mkdir -p /tmp/sessions && chmod 1777 /tmp/sessions
+RUN a2enmod rewrite
+
+COPY www /var/www/html
+
+RUN chown -R www-data:www-data /var/www/html /tmp/sessions
