@@ -1,0 +1,11 @@
+services:
+  # Apache with allow_url_include=On for wrapper + log poison testing
+  apache-wrapper:
+    build:
+      context: .
+      dockerfile: Dockerfile.apache
+    ports:
+      - "18082:80"
+    volumes:
+      - ./www:/var/www/html
+      - ./php-apache-wrapper-test.ini:/usr/local/etc/php/conf.d/99-custom.ini:ro

