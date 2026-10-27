@@ -793,10 +793,22 @@ def _load_chain_d_profiles(custom_path: Optional[str] = None) -> Dict[str, Dict[
         data = json.load(f)
     profiles: Dict[str, Dict[str, int]] = {}
     for key, offsets in data.get("profiles", {}).items():
-        profiles[key] = {
-            k: int(v, 16) if isinstance(v, str) else v
-            for k, v in offsets.items()
-        }
+        if key.startswith("_"):
+            continue
+        if not isinstance(offsets, dict):
+            continue
+        parsed: Dict[str, Any] = {}
+        for k, v in offsets.items():
+            if isinstance(v, str):
+                if v.startswith("0x") or v.startswith("0X"):
+                    parsed[k] = int(v, 16)
+                else:
+                    parsed[k] = v
+            elif isinstance(v, bool):
+                parsed[k] = v
+            elif isinstance(v, (int, float)):
+                parsed[k] = int(v)
+        profiles[key] = parsed
     return profiles
 
 
@@ -1221,7 +1233,8 @@ def _try_chain_d_rce(
         distro_hint = build_meta["distro"]
     packaging = getattr(profile, "packaging", None)
     if not distro_hint and packaging:
-        for d in ("trixie", "bookworm", "bullseye", "buster", "alpine"):
+        for d in ("trixie", "bookworm", "bullseye", "buster", "noble", "jammy",
+                   "el9", "el8", "alpine"):
             if d in packaging.lower():
                 distro_hint = d
                 break
@@ -1230,18 +1243,21 @@ def _try_chain_d_rce(
     seen_keys: set = set()
     partial = ".".join(php_version.split(".")[:2]) if php_version else None
 
+    def _tier_tag(base_tier: str, offs: Dict[str, Any]) -> str:
+        return base_tier + (",unverified" if offs.get("verified") is False else "")
+
     if distro_hint:
         for key, offs in chain_d_profiles.items():
             if (php_version and php_version in key
                     and sapi_hint and sapi_hint in key
                     and distro_hint in key):
-                candidates.append((key, offs, "exact+distro"))
+                candidates.append((key, offs, _tier_tag("exact+distro", offs)))
                 seen_keys.add(key)
 
     for key, offs in chain_d_profiles.items():
         if (key not in seen_keys and php_version and php_version in key
                 and sapi_hint and sapi_hint in key):
-            candidates.append((key, offs, "exact"))
+            candidates.append((key, offs, _tier_tag("exact", offs)))
             seen_keys.add(key)
 
     for key, offs in chain_d_profiles.items():

@@ -174,6 +174,82 @@
       "zif_system": "0x36E0B0",
       "fake_array_S": "0xF8358",
       "hsv": "0x7D6E0"
+    },
+
+    "_comment_ubuntu": "Ubuntu profiles — libapache2-mod-php from Ubuntu repos, needs lab validation",
+    "8.3.6-apache-noble-x86_64": {
+      "zval_ptr_dtor": "0x495A00",
+      "zif_system": "0x3A5500",
+      "fake_array_S": "0xF8358",
+      "hsv": "0x7D6E0",
+      "verified": false,
+      "source": "estimated from bookworm 8.3.35 — revalidate with Ubuntu 24.04 libapache2-mod-php8.3"
+    },
+    "8.1.12-apache-jammy-x86_64": {
+      "zval_ptr_dtor": "0x44E800",
+      "zif_system": "0x369500",
+      "fake_array_S": "0xF82D8",
+      "hsv": "0x7D660",
+      "verified": false,
+      "source": "estimated from bookworm 8.1.31 — revalidate with Ubuntu 22.04 libapache2-mod-php8.1"
+    },
+    "8.3.6-apache-noble-aarch64": {
+      "zval_ptr_dtor": "0x469000",
+      "zif_system": "0x374000",
+      "fake_array_S": "0xF8358",
+      "hsv": "0x7D6E0",
+      "verified": false,
+      "source": "estimated from bookworm 8.3.35 aarch64 — revalidate with Ubuntu 24.04 aarch64"
+    },
+    "8.1.12-apache-jammy-aarch64": {
+      "zval_ptr_dtor": "0x427000",
+      "zif_system": "0x33C000",
+      "fake_array_S": "0xF82D8",
+      "hsv": "0x7D660",
+      "verified": false,
+      "source": "estimated from bookworm 8.1.31 aarch64 — revalidate with Ubuntu 22.04 aarch64"
+    },
+
+    "_comment_rhel": "RHEL/CentOS profiles — php-fpm / mod_php from RHEL repos, needs lab validation",
+    "8.0.30-apache-el9-x86_64": {
+      "zval_ptr_dtor": "0x430000",
+      "zif_system": "0x348000",
+      "fake_array_S": "0xF8298",
+      "hsv": "0x7D620",
+      "verified": false,
+      "source": "estimated from bullseye 8.0.30 — revalidate with RHEL 9 / Rocky 9 mod_php"
+    },
+    "8.0.30-apache-el8-x86_64": {
+      "zval_ptr_dtor": "0x42C000",
+      "zif_system": "0x344000",
+      "fake_array_S": "0xF8298",
+      "hsv": "0x7D620",
+      "verified": false,
+      "source": "estimated from buster 8.0.30 — revalidate with RHEL 8 / CentOS 8 mod_php"
+    },
+    "8.2.34-apache-el9-x86_64": {
+      "zval_ptr_dtor": "0x47B000",
+      "zif_system": "0x391000",
+      "fake_array_S": "0xF8318",
+      "hsv": "0x7D6A0",
+      "verified": false,
+      "source": "estimated from bookworm 8.2.34 — revalidate with RHEL 9 / Rocky 9 mod_php"
+    },
+    "8.0.30-apache-el9-aarch64": {
+      "zval_ptr_dtor": "0x40C000",
+      "zif_system": "0x31D000",
+      "fake_array_S": "0xF8298",
+      "hsv": "0x7D620",
+      "verified": false,
+      "source": "estimated from bullseye 8.0.30 aarch64 — revalidate with RHEL 9 aarch64"
+    },
+    "8.2.34-apache-el9-aarch64": {
+      "zval_ptr_dtor": "0x45A000",
+      "zif_system": "0x369000",
+      "fake_array_S": "0xF8318",
+      "hsv": "0x7D6A0",
+      "verified": false,
+      "source": "estimated from bookworm 8.2.34 aarch64 — revalidate with RHEL 9 aarch64"
     }
   }
 }

