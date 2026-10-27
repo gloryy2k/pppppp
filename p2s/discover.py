@@ -1199,14 +1199,18 @@ def probe_oom(
     result["evidence_ref"] = item.id
     result["status"] = exchange.status
 
+    # Detect chunked TE being stripped (WAF/proxy rewriting)
+    resp_hdrs = getattr(exchange, "response_headers", {}) or {}
+    if exchange.status == 413:
+        result["chunked_stripped"] = True
+        result["body_snippet"] = "413 Payload Too Large — chunked TE likely stripped by WAF/proxy"
+        return result
+
     body_text = _body_text(exchange)
     if _OOM_DETECT.search(body_text):
         result["triggered"] = True
         result["body_snippet"] = body_text[:200]
     elif exchange.status in (500, 502):
-        # display_errors=Off hides the error text, but 500/502 from our
-        # specifically crafted OOM body is a strong signal: real pages rarely
-        # return 500 on a plain POST with nested multipart fields.
         result["triggered"] = True
         result["body_snippet"] = body_text[:200] if body_text else "(empty — display_errors likely Off)"
 
@@ -1479,7 +1483,12 @@ def run_discovery(
             result.oom_sapi_is_mod_php = True
         if oom["evidence_ref"]:
             result.evidence_refs.append(oom["evidence_ref"])
-        if oom["triggered"]:
+        if oom.get("chunked_stripped"):
+            _log("WARNING: chunked Transfer-Encoding appears stripped (413 response) — "
+                 "WAF or reverse proxy may block OOM trigger. Chain D will not work.")
+            result.oom_vulnerable = False
+            result.notes.append("chunked TE stripped by WAF/proxy (413)")
+        elif oom["triggered"]:
             _log(f"OOM triggered! status={oom['status']} — Chain D may be viable")
         else:
             _log(f"OOM probe negative (status={oom['status']})")

