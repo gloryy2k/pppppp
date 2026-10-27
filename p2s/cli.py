@@ -2283,7 +2283,7 @@ examples:
                       help=f"number of exploit attempts per chain (1..{MAX_ATTEMPTS})")
     auto.add_argument("--race-delay", type=float, default=0.05,
                       help="upload-progress stall delay for chain A")
-    auto.add_argument("--max-discover-requests", type=int, default=120,
+    auto.add_argument("--max-discover-requests", type=int, default=150,
                       help="request budget for the discovery phase")
     auto.add_argument("--max-exploit-requests", type=int, default=60,
                       help="request budget per exploit chain")

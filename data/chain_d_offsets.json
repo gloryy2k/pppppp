@@ -126,6 +126,54 @@
       "zif_system": "0x340DC0",
       "fake_array_S": "0xF82D8",
       "hsv": "0x7D660"
+    },
+    "8.0.30-apache-bullseye-x86_64": {
+      "zval_ptr_dtor": "0x4319A0",
+      "zif_system": "0x3495D0",
+      "fake_array_S": "0xF8298",
+      "hsv": "0x7D620"
+    },
+    "8.0.30-apache-buster-x86_64": {
+      "zval_ptr_dtor": "0x42BFC0",
+      "zif_system": "0x342DD0",
+      "fake_array_S": "0xF8298",
+      "hsv": "0x7D620"
+    },
+    "8.2.27-apache-bookworm-x86_64": {
+      "zval_ptr_dtor": "0x47B070",
+      "zif_system": "0x392880",
+      "fake_array_S": "0xF8318",
+      "hsv": "0x7D6A0"
+    },
+    "8.3.19-apache-bookworm-x86_64": {
+      "zval_ptr_dtor": "0x4913F0",
+      "zif_system": "0x3A1F50",
+      "fake_array_S": "0xF8358",
+      "hsv": "0x7D6E0"
+    },
+    "8.0.30-apache-bullseye-aarch64": {
+      "zval_ptr_dtor": "0x40DDB0",
+      "zif_system": "0x31EF70",
+      "fake_array_S": "0xF8298",
+      "hsv": "0x7D620"
+    },
+    "8.0.30-apache-buster-aarch64": {
+      "zval_ptr_dtor": "0x409588",
+      "zif_system": "0x31B700",
+      "fake_array_S": "0xF8298",
+      "hsv": "0x7D620"
+    },
+    "8.2.27-apache-bookworm-aarch64": {
+      "zval_ptr_dtor": "0x4584B0",
+      "zif_system": "0x36BC00",
+      "fake_array_S": "0xF8318",
+      "hsv": "0x7D6A0"
+    },
+    "8.3.19-apache-bookworm-aarch64": {
+      "zval_ptr_dtor": "0x460A70",
+      "zif_system": "0x36E0B0",
+      "fake_array_S": "0xF8358",
+      "hsv": "0x7D6E0"
     }
   }
 }
