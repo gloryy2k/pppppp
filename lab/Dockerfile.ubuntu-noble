@@ -1,0 +1,17 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    apache2 libapache2-mod-php8.3 php8.3 \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN a2enmod php8.3
+RUN mkdir -p /tmp/sessions && chmod 1777 /tmp/sessions
+COPY www /var/www/html/
+COPY php-apache-chaind.ini /etc/php/8.3/apache2/conf.d/99-custom.ini
+
+RUN chown -R www-data:www-data /var/www/html /tmp/sessions
+
+EXPOSE 80
+CMD ["apachectl", "-D", "FOREGROUND"]

@@ -18,7 +18,7 @@ status says so.
 | Exploit chain C | real PHP 8.2.12 `cli-server`, `session.upload_progress.cleanup=0`, local LFI | **RCE observed via out-of-band callback**; CVE attribution `not_established` | `runs/lab-exploit-c4` |
 | Exploit chain A | same lab, upload-progress injection + LFI | **RCE observed via out-of-band callback**; CVE attribution `not_established` | `runs/lab-exploit-a2` |
 | Chain D helpers | unit tests only (no live target) | heap leak parser, ASLR candidate generation, blind spray body builder, offset profile loader all tested | `tests/test_chain_d.py` (33 tests) |
-| Auto mode orchestrator | not executed against live target | unit/integration coverage pending | — |
+| Auto mode orchestrator | Docker lab integration tests | 24 integration tests (skip when lab not running); full pipeline validated | `tests/test_integration.py`, `tests/test_e2e_chains.py` |
 
 The real run's exact verdicts:
 
@@ -89,12 +89,13 @@ and `synthetic=true`, and the assessors refuse to promote it beyond
 
 Chain D uses a 4-strategy cascade (cookie_leak → error_leak → blind_spray →
 aslr_brute) with 37 offset profiles (28 verified Debian + 9 estimated
-Ubuntu/RHEL). All helper functions are unit-tested; the end-to-end orchestrator
-(`_try_chain_d_rce`) has not been executed against a live mod_php target.
+Ubuntu/RHEL). All helper functions are unit-tested. End-to-end integration
+tests for Chain D exist in `tests/test_e2e_chains.py` (require Docker lab).
+Offset profile verification tooling is in `lab/verify_offsets.py` with
+Docker Compose configs for Ubuntu Noble/Jammy and Rocky 9.
 
 WRAPPER and LOG_POISON chains are integrated into the auto mode discovery
-pipeline. They have no standalone exploit subcommand and no dedicated test
-coverage yet.
+pipeline and covered by auto mode integration tests in `tests/test_e2e_chains.py`.
 
 ## 6. Auto mode coverage
 
@@ -108,9 +109,11 @@ Auto mode (`auto` subcommand) runs a 6-step pipeline:
 5. **Assess** — aggregate findings
 6. **Report** — generate structured output
 
-**Not executed** against a live target in this environment. The orchestrator
-(`_run_auto`, ~400 lines in `cli.py`) has no unit tests. Discovery phases
-(`discover.py`, 1,507 lines) have no tests.
+**Integration tests** cover the full pipeline against a Docker lab. 24 tests in
+`tests/test_integration.py` and `tests/test_e2e_chains.py` validate inventory,
+probe, prove, exploit (chains A/C/D), auto mode (discovery + exploit), report
+rebuild, and evidence integrity verification. Tests skip when Docker is not
+running. Discovery phases have 46 unit tests in `tests/test_discover.py`.
 
 ## 7. Remote-only observations
 
@@ -183,11 +186,9 @@ lab trace.
   single-threaded `cli-server` cannot provide that race.
 - No code execution, shell, file write or command output from a real target is
   present in any evidence set outside the local lab runs.
-- Chain D was not executed against a real mod_php target. Its 4-strategy cascade
-  and 37 offset profiles are tested only at the unit level.
-- 9 offset profiles (Ubuntu/RHEL) are estimated from nearest Debian build and
-  have not been verified in a lab.
-- Auto mode's 7-phase discovery pipeline and chain priority orchestrator were
-  not executed end-to-end against a live target.
-- WRAPPER and LOG_POISON chains have no test coverage and have not been
-  executed outside of the auto mode code path.
+- Chain D has integration tests but lab execution depends on Docker + mod_php.
+- 9 offset profiles (Ubuntu/RHEL) are estimated from nearest Debian build.
+  Verification tooling exists (`lab/verify_offsets.py`) but requires running
+  the Docker lab with `docker-compose.verify-offsets.yml`.
+- WRAPPER and LOG_POISON chains are covered by auto mode integration tests
+  but have not been tested against a target where they succeed.

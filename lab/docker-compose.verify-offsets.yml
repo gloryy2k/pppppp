@@ -1,0 +1,37 @@
+# Docker Compose for verifying unverified Ubuntu/RHEL offset profiles.
+#
+# Usage:
+#   docker compose -f docker-compose.verify-offsets.yml up -d --build
+#   python verify_offsets.py --ack-authorised
+#   docker compose -f docker-compose.verify-offsets.yml down -v
+#
+# Each service exposes the PHP binary with mod_php symbols so
+# verify_offsets.py can extract real offsets via `docker exec ... nm`.
+
+services:
+  ubuntu-noble:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu-noble
+    ports:
+      - "18090:80"
+    volumes:
+      - ./www:/var/www/html
+
+  ubuntu-jammy:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu-jammy
+    ports:
+      - "18091:80"
+    volumes:
+      - ./www:/var/www/html
+
+  rocky9:
+    build:
+      context: .
+      dockerfile: Dockerfile.rocky9
+    ports:
+      - "18092:80"
+    volumes:
+      - ./www:/var/www/html

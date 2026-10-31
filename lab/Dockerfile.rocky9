@@ -1,0 +1,12 @@
+FROM rockylinux:9
+
+RUN dnf install -y httpd php php-common binutils && dnf clean all
+
+RUN mkdir -p /tmp/sessions && chmod 1777 /tmp/sessions
+COPY www /var/www/html/
+COPY php-apache-chaind.ini /etc/php.d/99-custom.ini
+
+RUN chown -R apache:apache /var/www/html /tmp/sessions
+
+EXPOSE 80
+CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]
