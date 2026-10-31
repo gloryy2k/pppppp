@@ -10,12 +10,15 @@
 from __future__ import annotations
 
 import http.client
+import logging
 import socket
 import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlsplit
+
+_log = logging.getLogger(__name__)
 
 from .util import (
     header_lookup,
@@ -215,6 +218,7 @@ class HttpClient:
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=tmo)
 
+            _log.debug("%s %s (timeout=%.1fs)", method, redact_url(url), tmo)
             start = time.monotonic()
             request_target = url if (proxy and parts.scheme == "http") else path
             conn.putrequest(method, request_target, skip_host=True, skip_accept_encoding=True)
@@ -274,12 +278,14 @@ class HttpClient:
                 None,
             )
         except ssl.SSLCertVerificationError as exc:
+            _log.debug("TLS verification failed: %s", exc)
             raise fail("tls_verification", str(exc))
         except ssl.SSLError as exc:
             raise fail("tls", str(exc))
         except socket.gaierror as exc:
             raise fail("dns", str(exc))
         except (socket.timeout, TimeoutError) as exc:
+            _log.debug("timeout: %s %s", method, redact_url(url))
             raise fail("timeout", str(exc) or "request timed out")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
             raise fail("reset", str(exc) or "connection reset")

@@ -10,6 +10,7 @@ prerequisites for at least one chain are satisfied.
 
 from __future__ import annotations
 
+import logging
 import re
 import socket
 import time
@@ -17,6 +18,8 @@ from base64 import b64decode
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
+
+_log = logging.getLogger(__name__)
 
 from .classifier import classify
 from .http import HttpClient, HttpExchange
@@ -713,6 +716,7 @@ def discover_lfi(
     timeout: float = 8.0,
     max_lfi_requests: int = 100,
 ) -> List[LfiEndpoint]:
+    _log.debug("LFI discovery: budget=%d max_lfi=%d", budget.remaining, max_lfi_requests)
     endpoints: List[LfiEndpoint] = []
     baseline_body = homepage_body
 
@@ -1303,6 +1307,7 @@ def run_discovery(
     max_requests: int = 120,
     timeout: float = 8.0,
     log: Any = None,
+    max_spider_pages: int = 15,
 ) -> DiscoverResult:
     budget = DiscoverBudget(max_requests=max_requests)
     result = DiscoverResult()
@@ -1353,6 +1358,7 @@ def run_discovery(
         _log("phase 1b: spidering for PHP pages")
         crawled = spider_pages(
             client, profile, store, budget, homepage_body, timeout,
+            max_pages=max_spider_pages,
         )
         result.crawled_pages = [p for p, _ in crawled]
         if crawled:

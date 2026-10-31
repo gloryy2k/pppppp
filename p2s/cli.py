@@ -13,8 +13,10 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import atexit
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -49,6 +51,8 @@ from .scenarios import SCENARIOS, scenario_list, select
 from .chain_d import _load_chain_d_profiles, _try_chain_d_rce
 from .util import new_id, new_nonce, slugify, utcnow
 from .version import CVE_618, CVE_619, VERSION
+
+log = logging.getLogger("p2s")
 
 PROOF_STATUSES = {
     "AFFECTED_PATH_CONFIRMED",
@@ -514,6 +518,7 @@ def _run_exploit(args: argparse.Namespace) -> int:
                     expected_sources=list(args.callback_expect or []),
                 )
                 listener.start()
+                atexit.register(listener.stop)
             except Exception:
                 listener = None
         dr = _try_chain_d_rce(
@@ -663,6 +668,7 @@ def _run_auto(args: argparse.Namespace) -> int:
             max_requests=args.max_discover_requests,
             timeout=args.timeout,
             log=_log,
+            max_spider_pages=getattr(args, "max_spider_pages", 15),
         )
     else:
         print("  [3/6] discovery (skipped)")
@@ -758,6 +764,7 @@ def _run_auto(args: argparse.Namespace) -> int:
             if args.callback_ip:
                 listener.local_ip = args.callback_ip
             listener.start()
+            atexit.register(listener.stop)
         except OSError as exc:
             print(f"    ! callback listener failed: {exc}")
             listener = None
@@ -1121,6 +1128,8 @@ examples:
     def common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--out", help="evidence/run directory")
         p.add_argument("--json", action="store_true", help="machine-readable stdout summary")
+        p.add_argument("-v", "--verbose", action="count", default=0,
+                       help="increase log verbosity (-v=DEBUG, default=WARNING)")
         p.add_argument("--timeout", type=float, default=10.0, help="per-request timeout (seconds)")
         p.add_argument("--probe-timeout", type=float, default=30.0, help="probe/health timeout (seconds)")
         p.add_argument("--max-body", type=int, default=262144, help="max response bytes stored")
@@ -1272,6 +1281,8 @@ examples:
                       help="skip discovery phases; requires --lfi-path")
     auto.add_argument("--chain-d-offsets", metavar="FILE",
                       help="JSON file with Chain D offset profiles (default: bundled data/chain_d_offsets.json)")
+    auto.add_argument("--max-spider-pages", type=int, default=15,
+                      help="maximum pages to crawl during discovery spider (default: 15)")
 
     report = sub.add_parser("report", help="rebuild findings from stored evidence (no network)")
     report.add_argument("evidence_dir")
@@ -1285,9 +1296,24 @@ examples:
     return parser
 
 
+def _setup_logging(verbosity: int) -> None:
+    level = logging.WARNING
+    if verbosity >= 2:
+        level = logging.DEBUG
+    elif verbosity >= 1:
+        level = logging.INFO
+    logging.basicConfig(
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+        level=level,
+        stream=sys.stderr,
+    )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _setup_logging(getattr(args, "verbose", 0))
     try:
         if args.mode == "inventory":
             return _run_inventory_or_probe(args, "inventory")

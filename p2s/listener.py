@@ -11,6 +11,7 @@ main thread at any time.
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
@@ -21,6 +22,8 @@ from base64 import b64decode
 from urllib.parse import unquote_plus, urlparse, parse_qs
 
 from .util import utcnow
+
+_log = logging.getLogger(__name__)
 
 # Bound what an unauthenticated internet-facing listener will read/store.
 MAX_CALLBACK_BODY = 65536
@@ -121,6 +124,8 @@ def _make_handler(state: ListenerState):
                 command_output=command_output,
             )
             state.add(cb)
+            _log.info("callback received: nonce=%s remote=%s:%d",
+                      nonce, self.client_address[0], self.client_address[1])
 
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
@@ -186,12 +191,15 @@ class CallbackListener:
             name="p2s-callback-listener",
         )
         self._thread.start()
+        _log.info("callback listener started on %s:%d", self.bind, self.port)
 
     def stop(self) -> None:
+        _log.debug("shutting down callback listener")
         self._server.shutdown()
         if self._thread:
             self._thread.join(timeout=5)
         self._server.server_close()
+        _log.info("callback listener stopped")
 
     def wait_for_callback(self, nonce: str, timeout: float = 30.0) -> Optional[Callback]:
         deadline = time.monotonic() + timeout

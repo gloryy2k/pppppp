@@ -14,11 +14,14 @@ Requires mod_php SAPI. Hard 200-request budget with timing jitter.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
+
+_log = logging.getLogger(__name__)
 
 from .classifier import classify
 from .evidence import RunStore
