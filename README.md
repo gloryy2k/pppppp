@@ -394,6 +394,7 @@ python -m unittest discover -s tests -v
 - `SCHEMA.md` — Evidence/report/finding data formats
 - `LIMITATIONS.md` — Known limits and non-claims
 - `MIGRATION.md` — Mapping from original scanner to v4
+- `CHANGELOG.md` — Release history
 
 ## Disclaimer
 

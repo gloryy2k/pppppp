@@ -17,6 +17,8 @@ status says so.
 | Hash verification | both runs | PASS | `verify` output |
 | Exploit chain C | real PHP 8.2.12 `cli-server`, `session.upload_progress.cleanup=0`, local LFI | **RCE observed via out-of-band callback**; CVE attribution `not_established` | `runs/lab-exploit-c4` |
 | Exploit chain A | same lab, upload-progress injection + LFI | **RCE observed via out-of-band callback**; CVE attribution `not_established` | `runs/lab-exploit-a2` |
+| Chain D helpers | unit tests only (no live target) | heap leak parser, ASLR candidate generation, blind spray body builder, offset profile loader all tested | `tests/test_chain_d.py` (33 tests) |
+| Auto mode orchestrator | not executed against live target | unit/integration coverage pending | — |
 
 The real run's exact verdicts:
 
@@ -74,7 +76,43 @@ and `synthetic=true`, and the assessors refuse to promote it beyond
 | `CODE_EXECUTION_CONFIRMED` | **no** | Needs a verified independent canary bound to request/worker. |
 | `PATCH_CONFIRMED` | **no** | Needs a real patched build/package with high trust. |
 
-## 5. Remote-only observations
+## 5. Exploit chain coverage
+
+| Chain | Technique | CVE | Lab-proven RCE? | Unit tests |
+|---|---|---|---|---|
+| **A** | Session `upload_progress` injection + LFI | 109618 | yes (`runs/lab-exploit-a2`) | 34 tests in `test_exploit.py` |
+| **B** | Session deserialization gadget | 109619 | no (needs operator POP chain + multi-worker SAPI) | 34 tests in `test_exploit.py` |
+| **C** | Direct callback via upload_progress filename | 109618 | yes (`runs/lab-exploit-c4`) | 34 tests in `test_exploit.py` |
+| **D** | Pure OOM mod_php (no LFI) | 109618 | no (no mod_php lab available) | 33 tests in `test_chain_d.py` |
+| **WRAPPER** | php:// stream wrapper injection | 109618 | no (discovery + auto mode only) | — |
+| **LOG_POISON** | Error log poisoning + LFI | 109618 | no (discovery + auto mode only) | — |
+
+Chain D uses a 4-strategy cascade (cookie_leak → error_leak → blind_spray →
+aslr_brute) with 37 offset profiles (28 verified Debian + 9 estimated
+Ubuntu/RHEL). All helper functions are unit-tested; the end-to-end orchestrator
+(`_try_chain_d_rce`) has not been executed against a live mod_php target.
+
+WRAPPER and LOG_POISON chains are integrated into the auto mode discovery
+pipeline. They have no standalone exploit subcommand and no dedicated test
+coverage yet.
+
+## 6. Auto mode coverage
+
+Auto mode (`auto` subcommand) runs a 6-step pipeline:
+
+1. **Inventory** — collect target profile
+2. **Probe** — test multipart upload reachability
+3. **Discovery** — 7-phase attack surface enumeration (phpinfo → spider → LFI →
+   wrappers → session upload_progress → log poisoning → OOM probe)
+4. **Exploit chains** — tried in priority order: WRAPPER → LOG_POISON → A → C → D → B
+5. **Assess** — aggregate findings
+6. **Report** — generate structured output
+
+**Not executed** against a live target in this environment. The orchestrator
+(`_run_auto`, ~400 lines in `cli.py`) has no unit tests. Discovery phases
+(`discover.py`, 1,507 lines) have no tests.
+
+## 7. Remote-only observations
 
 Against a real remote target, the scanner can honestly produce:
 
@@ -100,7 +138,7 @@ proves that chain A/C can execute a payload on a deliberately LFI-vulnerable
 `cli-server` harness; it does not show that the advisory's OOM/stale-state
 primitive delivered it.
 
-## 6. Patched/unpatched matrix: unexecuted
+## 8. Patched/unpatched matrix: unexecuted
 
 `lab/matrix/` contains pinned compose services for:
 
@@ -127,7 +165,7 @@ assessors require. The matrix is for observing OOM, patch skipping, worker
 behaviour and report integrity across builds; it is not a substitute for the
 lab trace.
 
-## 7. What the evidence in this repository does not show
+## 9. What the evidence in this repository does not show
 
 - No patched PHP 8.2.35+ build was executed.
 - No Apache mod_php or PHP-FPM process was exercised.
@@ -145,3 +183,11 @@ lab trace.
   single-threaded `cli-server` cannot provide that race.
 - No code execution, shell, file write or command output from a real target is
   present in any evidence set outside the local lab runs.
+- Chain D was not executed against a real mod_php target. Its 4-strategy cascade
+  and 37 offset profiles are tested only at the unit level.
+- 9 offset profiles (Ubuntu/RHEL) are estimated from nearest Debian build and
+  have not been verified in a lab.
+- Auto mode's 7-phase discovery pipeline and chain priority orchestrator were
+  not executed end-to-end against a live target.
+- WRAPPER and LOG_POISON chains have no test coverage and have not been
+  executed outside of the auto mode code path.

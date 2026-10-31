@@ -13,6 +13,7 @@ one run, then reported a single "confidence" for the target. v4 separates:
 - **probe** — low-impact reachability;
 - **prove** — explicit bounded scenario execution;
 - **exploit** — explicit destructive chain with out-of-band callback verification;
+- **auto** — end-to-end discovery + exploit pipeline;
 - **report** — offline reconstruction from evidence;
 - **verify** — artefact hash verification.
 
@@ -37,7 +38,7 @@ silently become "VULNERABLE" or "CLEAN".
 | `--handler-write`, `--handler-read` | no direct equivalent | v4 does not run handler-mismatch chains. Use a lab harness and provide telemetry. |
 | `--lfi` | `exploit --chain A --lfi-path PATH` | Needs `--ack-authorised`. LFI is only a delivery vector; RCE needs a verified callback. |
 | `--session-path` | `exploit --session-path` | Same guess-the-`session.save_path` caveat as v3. |
-| `--exploit-lfi`, `--exploit-mismatch` | `exploit --chain A\|B\|C` | `A` = session+LFI, `B` = deserialization gadget, `C` = direct callback. Mismatch chains are still not ported. |
+| `--exploit-lfi`, `--exploit-mismatch` | `exploit --chain A\|B\|C\|D` | `A` = session+LFI, `B` = deserialization gadget, `C` = direct callback, `D` = pure OOM mod_php. Mismatch chains are still not ported. |
 | `--pollute-path`, `--trigger-path`, `--inject-path` | `exploit --trigger-path`, `--inject-path` | `--pollute-path` has no equivalent; the producer step uses `/`. |
 | `--command` | `exploit --command` | Passed through `shell_exec`; CR/LF/NUL are rejected. |
 | `--gadget` | `exploit --gadget` | Chain B only, and it is required. The scanner ships no POP chain. Pair it with `--canary-nonce` so the callback can be correlated. |
@@ -56,7 +57,7 @@ silently become "VULNERABLE" or "CLEAN".
 --telemetry-source NAME   force the telemetry source label
 --scenario ID             explicit prove scenario (repeatable)
 --ack-authorised          required for prove and exploit
---chain A|B|C             exploit chain (exploit mode only)
+--chain A|B|C|D           exploit chain (exploit mode only)
 --cve CVE-...             CVE label for an exploit run
 --lfi-path PATH           LFI/include vector (exploit chains A/C)
 --session-path PREFIX     PHP session file prefix (default /tmp/sessions/sess_)
@@ -68,8 +69,9 @@ silently become "VULNERABLE" or "CLEAN".
 --canary-nonce NONCE      chain B nonce to embed in the gadget's callback URL
 --callback-port N         out-of-band callback listener port (0 = auto)
 --callback-bind ADDR      callback listener bind address
---callback-ip ADDR        address the target should call back to
+--callback-ip ADDR        address the target should call back to (auto-detected if omitted)
 --callback-expect ADDR    expected callback source IP (repeatable)
+--exec-func FUNC          preferred PHP exec function (system/passthru/shell_exec/exec/popen/proc_open)
 --attempts N              exploit attempts, 1..20
 --allow-remote            permit exploit payloads against a public host
 --max-requests N          request budget (prove run or exploit chain)
@@ -79,6 +81,10 @@ silently become "VULNERABLE" or "CLEAN".
 --concurrency N           must be 1 in prove
 --allow-rerun             allow a duplicate scenario id in the same evidence set
 --allow-non-advisory-sapi run a diagnostic OOM test on a SAPI the advisory did not evaluate
+--chain-d-offsets FILE    custom Chain D offset profiles JSON (replaces bundled profiles)
+--max-discover-requests N request budget for auto discovery phase (default 150)
+--max-exploit-requests N  request budget per auto exploit chain (default 60)
+--skip-discovery          skip auto discovery phases (requires --lfi-path)
 --synthetic-fixture       mark all evidence synthetic; confirmed statuses are refused
 --insecure                disable TLS verification (explicit opt-in)
 --ca-file PATH            custom CA bundle
@@ -142,6 +148,17 @@ Exit codes changed:
    network access.
 10. **Batch targets are external.** v4 has no `--targets`; run one directory per
     target so evidence and hashes stay isolated.
+11. **Auto mode.** `auto` is new in v4 and has no v3 equivalent. It runs a
+    6-step pipeline (inventory → probe → 7-phase discovery → exploit chains in
+    priority order → assess → report) against a single target. Chains are tried
+    in priority order: WRAPPER → LOG_POISON → A → C → D → B; first RCE wins.
+    It requires `--ack-authorised` and enforces separate budgets for discovery
+    (`--max-discover-requests`) and per-chain exploitation
+    (`--max-exploit-requests`).
+12. **Chain D.** Pure OOM mod_php exploitation without LFI. Uses a 4-strategy
+    cascade (cookie_leak → error_leak → blind_spray → aslr_brute) with 37
+    offset profiles. Requires mod_php SAPI. Hard 200-request budget with
+    timing jitter. Not available in v3.
 
 ## 6. Suggested migration steps
 
@@ -153,9 +170,11 @@ Exit codes changed:
 5. Only in a lab you own, and only after `inventory`/`probe` show reach, use
    `exploit --chain A --ack-authorised --lfi-path ... --callback-port 0` with
    budgets. Treat a verified callback as "payload executed", not as CVE proof.
-6. Use `report` to re-check conclusions from evidence; use `verify` before
+6. For end-to-end automated scanning, use `auto --ack-authorised` which
+   handles discovery through exploitation in one run with separate budgets.
+7. Use `report` to re-check conclusions from evidence; use `verify` before
    sharing a run.
-7. Replace any v3 "confidence" gate in CI with an explicit allow-list of
+8. Replace any v3 "confidence" gate in CI with an explicit allow-list of
    statuses. Do not treat `OOM_OBSERVED` or `EXPOSED_BUILD` as exploitation.
 
 ## 7. Compatibility notes

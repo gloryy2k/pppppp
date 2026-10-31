@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "php2shell"
+version = "4.0.0"
+description = "Evidence-first scanner for CVE-2026-109618 and CVE-2026-109619"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "gloryy2k" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.scripts]
+php2shell = "p2s.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["p2s*"]
+
+[tool.setuptools.package-data]
+p2s = ["../data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

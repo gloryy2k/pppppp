@@ -153,7 +153,66 @@ synthetic fixture can never claim this status.
   by the OOM producer or by repeated attempts. Health checks only show
   reachability, not internal state.
 
-## 8. Prove-mode limits
+## 8. Chain D limits
+
+- Chain D requires **mod_php SAPI**. It does not work with FPM, FrankenPHP,
+  LSAPI, cli-server, or cgi-fcgi. SAPI inference from the `Server` header
+  is marked as unverified; use `--sapi mod_php` to confirm.
+- The 4-strategy cascade (cookie_leak → error_leak → blind_spray → aslr_brute)
+  has a hard **200-request budget**. If all strategies exhaust their budget
+  without achieving RCE, Chain D reports failure.
+- **cookie_leak** parses Set-Cookie headers for heap pointers. If the target
+  strips or does not set cookies, this strategy silently fails and the cascade
+  moves on. Cookie parsing is capped at 64KB.
+- **error_leak** requires `display_errors=On` or an application that surfaces
+  PHP OOM error output. With `display_errors=Off` the heap pointer is
+  invisible to HTTP.
+- **blind_spray** sends multi-position spray payloads without a heap leak. It
+  is probabilistic and may not succeed even with a correct offset profile.
+- **aslr_brute** brute-forces the ASLR base address with an OOM refresh every
+  8 iterations. On a 47-bit ASLR space this can exhaust the 200-request budget
+  without a hit.
+- The 37 bundled offset profiles cover Debian, Ubuntu, and RHEL across
+  x86_64/aarch64. **9 profiles are estimated** from the nearest Debian build
+  and may not match actual Ubuntu/RHEL offsets. Custom profiles can be supplied
+  via `--chain-d-offsets`.
+- Offset profiles include `zend_execute_data`, `handler`, `jmp_buf`, and
+  `system_plt` offsets. A wrong offset causes the payload to crash the worker
+  without achieving RCE.
+- Timing jitter (50–200ms between requests) reduces IDS/WAF fingerprinting but
+  increases total scan time.
+- Chunked Transfer-Encoding stripping is detected (413 response) and Chain D
+  aborts when WAF/proxy interference is detected. A frontend that strips
+  `Transfer-Encoding: chunked` blocks the OOM trigger.
+- Chain D leaves no session files but may destabilise the target via repeated
+  OOM. Health checks only show reachability, not internal state.
+
+## 9. Auto-mode limits
+
+- Auto mode runs a 6-step pipeline (inventory → probe → discovery → exploit →
+  assess → report) as a single unattended run. A failure in any early step
+  (e.g. probe blocked by WAF) aborts the entire run.
+- **Discovery phases** (7 phases: phpinfo, spider, LFI, wrappers, session
+  upload_progress, log poisoning, OOM probe) are bounded by
+  `--max-discover-requests` (default 150). On large sites with many endpoints,
+  the budget may be exhausted before all phases complete.
+- The spider has no explicit depth or page limit beyond the request budget. On
+  sites with deep link trees, most of the discovery budget may be consumed by
+  spidering.
+- **Exploit chains** are tried in priority order: WRAPPER → LOG_POISON → A →
+  C → D → B. The first chain to achieve verified RCE wins; remaining chains
+  are skipped. Each chain gets `--max-exploit-requests` (default 60).
+- `--skip-discovery` bypasses all discovery phases but requires `--lfi-path`
+  to be supplied manually. Without an LFI path, chains A and C cannot run.
+- Auto mode inherits the wall-clock budget from `--max-seconds` (default 300).
+  Complex targets with slow responses may timeout before all chains are tried.
+- SAPI inference in auto mode uses the `Server` header, which is unreliable
+  (Apache could be running FPM via ProxyPassMatch). Chain D auto-selection
+  based on inferred SAPI may be wrong.
+- Auto mode does not retry failed chains or adjust strategy based on partial
+  results from earlier chains.
+
+## 10. Prove-mode limits
 
 - Scenarios are bounded and may not reach OOM on a target with a large
   `memory_limit` or a frontend that rejects the body.
@@ -171,7 +230,7 @@ synthetic fixture can never claim this status.
 - The scanner does not restart services, clean up sessions, or repair a target.
   An OOM can leave a lab service down; restart it yourself.
 
-## 9. Report and evidence limits
+## 11. Report and evidence limits
 
 - `verify` proves the stored evidence was not modified after collection. It does
   not prove the evidence was truthful when collected.
@@ -191,7 +250,7 @@ synthetic fixture can never claim this status.
 - There is no multi-target batch mode. Use one run directory per target so
   evidence and hashes stay isolated.
 
-## 10. Scope limits
+## 12. Scope limits
 
 - v4 assesses only CVE-2026-109618 and CVE-2026-109619. Other PHP
   vulnerabilities, framework bugs and application logic are out of scope.
@@ -204,7 +263,7 @@ synthetic fixture can never claim this status.
   highest status the evidence supports and names what is missing.
 - The two CVE verdicts are independent. Do not combine them into one score.
 
-## 11. What would change the conclusions
+## 13. What would change the conclusions
 
 To reach `AFFECTED_PATH_CONFIRMED` for 109618, provide:
 
