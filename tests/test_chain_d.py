@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from p2s.cli import (
+from p2s.chain_d import (
     _parse_error_leak,
     _parse_heap_leak,
     _generate_aslr_candidates,

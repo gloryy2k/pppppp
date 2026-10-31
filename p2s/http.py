@@ -126,18 +126,23 @@ class HttpClient:
         self.follow_redirects = follow_redirects
         self.max_redirects = max_redirects
         self.host_header = host_header
+        self._cached_ssl_ctx: Optional[ssl.SSLContext] = None
 
     # -- TLS ---------------------------------------------------------------
 
     def _ssl_context(self) -> ssl.SSLContext:
+        if self._cached_ssl_ctx is not None:
+            return self._cached_ssl_ctx
         if self.insecure:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-            return ctx
-        if self.ca_file:
-            return ssl.create_default_context(cafile=self.ca_file)
-        return ssl.create_default_context()
+        elif self.ca_file:
+            ctx = ssl.create_default_context(cafile=self.ca_file)
+        else:
+            ctx = ssl.create_default_context()
+        self._cached_ssl_ctx = ctx
+        return ctx
 
     # -- request plumbing --------------------------------------------------
 
@@ -225,12 +230,15 @@ class HttpClient:
             reason = resp.reason or ""
             status = int(resp.status)
             response_headers: Dict[str, str] = {}
+            set_cookies: List[str] = []
             for key, value in resp.getheaders():
                 lk = key.lower()
-                if lk in response_headers and lk == "set-cookie":
-                    response_headers[key] = response_headers.get(key, "") + " | " + value
+                if lk == "set-cookie":
+                    set_cookies.append(value)
                 else:
                     response_headers[key] = value
+            if set_cookies:
+                response_headers["Set-Cookie"] = "\n".join(set_cookies)
             raw_body = resp.read(self.max_body + 1)
             truncated = len(raw_body) > self.max_body
             if truncated:
